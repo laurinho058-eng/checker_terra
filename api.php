@@ -40,17 +40,27 @@ $action = $_GET['action'] ?? '';
 if ($action === 'init') {
     header('Content-Type: application/json');
     
-    // Limpar arquivos anteriores para um novo check limpo
-    if (file_exists('lives.txt')) @unlink('lives.txt');
-    if (file_exists('dies.txt')) @unlink('dies.txt');
+    // Garantir que os arquivos existam para evitar erros de unlink/file_put_contents
+    if (!file_exists('lives.txt')) touch('lives.txt');
+    if (!file_exists('dies.txt')) touch('dies.txt');
+    if (!file_exists('proxies.txt')) touch('proxies.txt');
+
+    // Limpar conteúdos anteriores
+    file_put_contents('lives.txt', '');
+    file_put_contents('dies.txt', '');
     
     $proxies = [];
-    if (file_exists('proxies.txt')) {
-        $proxies = file('proxies.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        $proxies = array_map('trim', $proxies);
+    $proxy_content = @file_get_contents('proxies.txt');
+    if ($proxy_content !== false) {
+        $proxies = array_filter(array_map('trim', explode("\n", $proxy_content)));
     }
     
-    echo json_encode(['proxies' => $proxies]);
+    // Retorna estrutura sempre válida
+    echo json_encode([
+        'status' => 'success', 
+        'proxies' => array_values($proxies), // Reindexa o array
+        'message' => 'System ready'
+    ]);
     exit;
 }
 
