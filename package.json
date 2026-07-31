@@ -1,0 +1,12 @@
+{
+  "name": "checker_logi_hotmail",
+  "version": "1.0.0",
+  "description": "Checker Hotmail Automation Engine",
+  "main": "puppeteer_check.js",
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  },
+  "scripts": {
+    "start": "php -S 0.0.0.0:$PORT"
+  }
+}

@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kroenen Engine — Secure Access</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg:        #020205;
+            --surface:   #0d0d12;
+            --border:    rgba(255,255,255,0.07);
+            --border-hi: rgba(255,255,255,0.14);
+            --text:      #f0f0f5;
+            --muted:     #6b7280;
+            --accent:    #7c3aed;
+            --accent-hi: #9f5cf7;
+            --danger:    #ef4444;
+            --radius:    14px;
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Animated grid bg */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(124,58,237,0.04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(124,58,237,0.04) 1px, transparent 1px);
+            background-size: 48px 48px;
+            z-index: 0;
+        }
+        body::after {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: radial-gradient(ellipse 80% 60% at 50% -10%, rgba(124,58,237,0.18) 0%, transparent 70%);
+            z-index: 0;
+        }
+
+        .card {
+            position: relative;
+            z-index: 1;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 3rem 2.5rem;
+            width: 100%;
+            max-width: 420px;
+            box-shadow: 0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03) inset;
+            animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+        }
+
+        @keyframes rise {
+            from { opacity: 0; transform: translateY(24px) scale(0.97); }
+            to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        /* Logo */
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 2.5rem;
+            justify-content: center;
+        }
+        .logo-icon {
+            width: 40px; height: 40px;
+            background: linear-gradient(135deg, var(--accent), #4f46e5);
+            border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 0 24px rgba(124,58,237,0.5);
+        }
+        .logo-icon svg { width: 22px; height: 22px; fill: #fff; }
+        .logo-name { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em; }
+        .logo-tag  { font-size: 0.7rem; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; }
+
+        .card-title { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.04em; margin-bottom: 0.4rem; text-align: center; }
+        .card-sub   { font-size: 0.875rem; color: var(--muted); text-align: center; margin-bottom: 2rem; }
+
+        .form-group { margin-bottom: 1.1rem; }
+        .form-group label {
+            display: block;
+            font-size: 0.8rem; font-weight: 500;
+            color: var(--muted);
+            margin-bottom: 0.45rem;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+        }
+        .input-wrap { position: relative; }
+        .input-icon {
+            position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+            color: var(--muted); pointer-events: none;
+        }
+        .input-icon svg { width: 16px; height: 16px; }
+        .form-control {
+            width: 100%;
+            padding: 0.75rem 1rem 0.75rem 2.5rem;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-size: 0.9rem;
+            font-family: inherit;
+            transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+            outline: none;
+        }
+        .form-control:focus {
+            border-color: var(--accent);
+            background: rgba(124,58,237,0.05);
+            box-shadow: 0 0 0 3px rgba(124,58,237,0.15);
+        }
+        .form-control::placeholder { color: rgba(107,114,128,0.6); }
+
+        .btn-login {
+            width: 100%;
+            padding: 0.85rem;
+            margin-top: 0.5rem;
+            background: linear-gradient(135deg, var(--accent), #4f46e5);
+            color: #fff;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.2s, transform 0.15s, box-shadow 0.2s;
+            box-shadow: 0 4px 20px rgba(124,58,237,0.4);
+            letter-spacing: 0.01em;
+        }
+        .btn-login:hover:not(:disabled) {
+            opacity: 0.9;
+            transform: translateY(-1px);
+            box-shadow: 0 8px 30px rgba(124,58,237,0.5);
+        }
+        .btn-login:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Loading spinner inside button */
+        .btn-login .spinner {
+            display: none;
+            width: 16px; height: 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            margin: auto;
+        }
+        .btn-login.loading .spinner { display: block; }
+        .btn-login.loading .btn-text { display: none; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .error-msg {
+            display: none;
+            background: rgba(239,68,68,0.08);
+            border: 1px solid rgba(239,68,68,0.2);
+            border-radius: var(--radius);
+            padding: 0.75rem 1rem;
+            color: var(--danger);
+            font-size: 0.85rem;
+            margin-bottom: 1.2rem;
+            text-align: center;
+        }
+
+        .divider { border: none; border-top: 1px solid var(--border); margin: 1.8rem 0 1rem; }
+        .footer-note { text-align: center; font-size: 0.75rem; color: var(--muted); }
+
+        /* Floating particles */
+        .particle {
+            position: fixed;
+            border-radius: 50%;
+            pointer-events: none;
+            animation: float linear infinite;
+            opacity: 0;
+        }
+        @keyframes float {
+            0%   { transform: translateY(100vh) scale(0); opacity: 0; }
+            10%  { opacity: 0.5; }
+            90%  { opacity: 0.2; }
+            100% { transform: translateY(-20vh) scale(1); opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Particles -->
+    <div class="particle" style="left:15%;width:3px;height:3px;background:var(--accent);animation-duration:12s;animation-delay:0s;"></div>
+    <div class="particle" style="left:35%;width:2px;height:2px;background:#818cf8;animation-duration:15s;animation-delay:2s;"></div>
+    <div class="particle" style="left:60%;width:4px;height:4px;background:var(--accent);animation-duration:10s;animation-delay:4s;"></div>
+    <div class="particle" style="left:80%;width:2px;height:2px;background:#a78bfa;animation-duration:18s;animation-delay:1s;"></div>
+    <div class="particle" style="left:50%;width:3px;height:3px;background:#6366f1;animation-duration:13s;animation-delay:6s;"></div>
+
+    <div class="card">
+        <div class="logo">
+            <div class="logo-icon">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                </svg>
+            </div>
+            <div>
+                <div class="logo-name">Kroenen Engine</div>
+                <div class="logo-tag">v2.0 · Enterprise</div>
+            </div>
+        </div>
+
+        <div class="card-title">Autenticação</div>
+        <div class="card-sub">Acesso restrito — insira suas credenciais</div>
+
+        <div class="error-msg" id="errorMsg"></div>
+
+        <form id="loginForm">
+            <div class="form-group">
+                <label>Usuário</label>
+                <div class="input-wrap">
+                    <span class="input-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                        </svg>
+                    </span>
+                    <input type="text" id="username" class="form-control" required placeholder="seu_usuario" autocomplete="username">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Senha</label>
+                <div class="input-wrap">
+                    <span class="input-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                        </svg>
+                    </span>
+                    <input type="password" id="password" class="form-control" required placeholder="••••••••" autocomplete="current-password">
+                </div>
+            </div>
+
+            <button type="submit" class="btn-login" id="btnSubmit">
+                <span class="btn-text">Entrar no Sistema</span>
+                <div class="spinner"></div>
+            </button>
+        </form>
+
+        <hr class="divider">
+        <p class="footer-note">Acesso monitorado · Kroenen Security &copy; 2025</p>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('msg') === 'expired') {
+            const err = document.getElementById('errorMsg');
+            err.textContent = 'Sua sessão expirou ou seu plano acabou.';
+            err.style.display = 'block';
+        }
+
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('btnSubmit');
+            const err = document.getElementById('errorMsg');
+            btn.disabled = true;
+            btn.classList.add('loading');
+            err.style.display = 'none';
+
+            const formData = new URLSearchParams();
+            formData.append('action', 'login');
+            formData.append('username', document.getElementById('username').value);
+            formData.append('password', document.getElementById('password').value);
+
+            try {
+                const response = await fetch('auth.php', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formData });
+                const data = await response.json();
+                if (data.status === 'success') {
+                    window.location.href = data.role === 'admin' ? 'admin.php' : 'index.php';
+                } else {
+                    err.textContent = data.message;
+                    err.style.display = 'block';
+                    btn.disabled = false;
+                    btn.classList.remove('loading');
+                }
+            } catch {
+                err.textContent = 'Erro de conexão com o servidor.';
+                err.style.display = 'block';
+                btn.disabled = false;
+                btn.classList.remove('loading');
+            }
+        });
+    </script>
+</body>
+</html>

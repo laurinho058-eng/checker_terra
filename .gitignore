@@ -1,0 +1,26 @@
+# Ignorar arquivos de senhas e resultados
+lives.txt
+dies.txt
+lista.txt
+found.txt
+
+# Ignorar cookies e tokens temporarios
+cookie*.txt
+
+# Ignorar arquivos de debug
+debug*.png
+debug*.js
+debug*.txt
+dump*.html
+page.html
+pwd_error.png
+pwd_error.html
+screenshot.png
+headers_*.txt
+login_dump.html
+fallback.png
+fallback.html
+
+# Ignorar Node.js (caso exista local)
+node_modules/
+package-lock.json

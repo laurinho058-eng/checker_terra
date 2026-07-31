@@ -1,0 +1,1 @@
+{"step_index":897,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-04-29T20:42:53Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"\"php -S localhost:8000\"","Cwd":"\"c:\\\\Users\\\\maarc\\\\Downloads\\\\NOVOS PROJETOS\\\\checker_login\"","SafeToAutoRun":"true","WaitMsBeforeAsync":"500"}}]}
