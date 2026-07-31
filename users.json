@@ -1,9 +1,9 @@
 {
-    "admin": {
-        "username": "admin",
-        "password": "$2y$12$I6RZTpaiEu2L.bHSASyck.TdzcFn\/Lk0\/jXNMtWrz9ck9i.EnSk5S",
-        "role": "admin",
-        "expiration": 4102444800,
-        "created_at": 1714421100
-    }
+  "admin": {
+    "username": "admin",
+    "password": "$2y$10$N8dLI2FaqklHlCvoW/XdWORt1cu90XhYG5N5nBMUSycM5aaEXU/Cu",
+    "role": "admin",
+    "expiration": -1,
+    "created_at": 1700000000
+  }
 }
