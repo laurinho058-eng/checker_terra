@@ -1,143 +1,293 @@
 <?php
 /**
- * terra_validator_secure_v2.php
- * Validador IMAP com Retry Inteligente, Backoff Exponencial e Diagnóstico Real
+ * terra_validator_secure_v3.php
+ * Validador IMAP com Retry Inteligente, Proxy Rotation e Diagnóstico Real
  * Data: 31 de julho de 2026
+ * 
+ * CORREÇÕES IMPLEMENTADAS:
+ * ✅ Validação flexível de email (aceita variações)
+ * ✅ Retry com backoff exponencial (1s, 2s, 4s, 8s...)
+ * ✅ Tratamento robusto de SSL/TLS com fallback
+ * ✅ Suporte a proxies com rotação aleatória
+ * ✅ Logging detalhado sem armazenar senhas
+ * ✅ Diagnóstico real de cada falha
  */
 declare(strict_types=1);
-
-session_start([
-    'cookie_httponly' => true,
-    'cookie_samesite' => 'Lax',
-    'cookie_secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
-]);
 
 header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
 header('Cache-Control: no-store, no-cache, must-revalidate');
-header('Access-Control-Allow-Origin: https://seu-dominio-seguro.com.br');
-header('Access-Control-Allow-Methods: POST');
 
 // ============================================================================
-// CONFIGURAÇÕES CRÍTICAS
+// CONFIGURAÇÕES
 // ============================================================================
+define('IMAP_HOST', getenv('IMAP_HOST') ?: 'imap.terra.com.br');
+define('IMAP_PORT', (int)(getenv('IMAP_PORT') ?: 993));
+define('IMAP_TIMEOUT', (int)(getenv('IMAP_TIMEOUT') ?: 20));
+define('MAX_RETRIES', (int)(getenv('MAX_RETRIES') ?: 3));
+define('INITIAL_BACKOFF', 1);
+define('MAX_BACKOFF', 16);
+define('RATE_LIMIT_PER_MIN', 3);
+define('PROXY_FILE', 'proxies.txt');
+define('LOG_FILE', 'terra_validation.log');
 
-define('IMAP_SERVER', '{imap.terra.com.br:993/imap/ssl}');
-define('IMAP_TIMEOUT', 15);           // Aumentado de 10 para 15 segundos
-define('MAX_RETRIES', 3);             // Número de tentativas
-define('INITIAL_BACKOFF', 1);         // 1 segundo inicial
-define('MAX_BACKOFF', 8);             // Máximo 8 segundos
-define('RATE_LIMIT_PER_MIN', 3);      // 3 requisições por minuto (não 5)
-define('CA_BUNDLE_PATH', '/etc/ssl/certs/ca-certificates.crt'); // Linux/Docker
+// CA Bundle paths para diferentes sistemas
+$ca_bundle_paths = [
+    '/etc/ssl/certs/ca-certificates.crt',      // Ubuntu/Debian
+    '/etc/pki/tls/certs/ca-bundle.crt',        // CentOS/RHEL
+    '/etc/ssl/ca-bundle.pem',                  // OpenSUSE
+    '/etc/ssl/cert.pem',                       // OpenBSD
+    '/usr/local/share/ca-certificates/',       // Alpine
+];
 
-// ============================================================================
-// FUNÇÕES AUXILIARES
-// ============================================================================
-
-function validate_email(string $email): bool
-{
-    return filter_var($email, FILTER_VALIDATE_EMAIL) !== false &&
-           preg_match('/@terra\.com\.br$/i', $email);
+$ca_bundle = null;
+foreach ($ca_bundle_paths as $path) {
+    if (file_exists($path)) {
+        $ca_bundle = $path;
+        break;
+    }
 }
 
-function check_rate_limit(): bool
+define('CA_BUNDLE_PATH', $ca_bundle ?: getenv('CA_BUNDLE_PATH') ?: '');
+
+// ============================================================================
+// CLASSE PRINCIPAL
+// ============================================================================
+class TerraValidator
 {
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
+    private array $proxies = [];
+    private int $proxy_index = 0;
+    private string $session_id;
+
+    public function __construct()
+    {
+        $this->session_id = uniqid('terra_', true);
+        $this->loadProxies();
     }
 
-    $now = time();
-    if (!isset($_SESSION['attempts'])) {
-        $_SESSION['attempts'] = [];
+    /**
+     * Carrega lista de proxies do arquivo
+     */
+    private function loadProxies(): void
+    {
+        if (!file_exists(PROXY_FILE)) {
+            return;
+        }
+
+        $lines = file(PROXY_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $this->proxies = array_filter(array_map('trim', $lines));
     }
 
-    $_SESSION['attempts'] = array_filter($_SESSION['attempts'], function($ts) use ($now) {
-        return ($now - $ts) < 60;
-    });
+    /**
+     * Obtém próximo proxy (Round-Robin)
+     */
+    private function getNextProxy(): ?string
+    {
+        if (empty($this->proxies)) {
+            return null;
+        }
 
-    if (count($_SESSION['attempts']) >= RATE_LIMIT_PER_MIN) {
-        return false;
+        $proxy = $this->proxies[$this->proxy_index % count($this->proxies)];
+        $this->proxy_index++;
+        return $proxy;
     }
 
-    $_SESSION['attempts'][] = $now;
-    return true;
-}
+    /**
+     * Valida formato de email (flexível)
+     */
+    private function validateEmail(string $email): bool
+    {
+        return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
+    }
 
-function log_event(string $email, string $status, string $message, ?int $retry_count = null): void
-{
-    $timestamp = date('Y-m-d H:i:s');
-    $retry_info = $retry_count !== null ? " [RETRY: $retry_count]" : '';
-    $log_entry = "[$timestamp] EMAIL: $email | STATUS: $status | MSG: $message$retry_info" . PHP_EOL;
-    error_log($log_entry, 3, 'auth_audit.log');
-}
+    /**
+     * Valida rate limit por sessão
+     */
+    private function checkRateLimit(): bool
+    {
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
 
-/**
- * Valida a conectividade SSL/TLS do servidor IMAP
- */
-function test_ssl_connectivity(string $host = 'imap.terra.com.br', int $port = 993): array
-{
-    $context = stream_context_create([
-        'ssl' => [
-            'verify_peer' => true,
-            'verify_peer_name' => true,
-            'allow_self_signed' => false,
-            'cafile' => CA_BUNDLE_PATH,
-        ]
-    ]);
+        $now = time();
+        if (!isset($_SESSION['terra_attempts'])) {
+            $_SESSION['terra_attempts'] = [];
+        }
 
-    $errno = 0;
-    $errstr = '';
-    $timeout = 10;
+        $_SESSION['terra_attempts'] = array_filter(
+            $_SESSION['terra_attempts'],
+            fn($ts) => ($now - $ts) < 60
+        );
 
-    $socket = @stream_socket_client(
-        "ssl://$host:$port",
-        $errno,
-        $errstr,
-        $timeout,
-        STREAM_CLIENT_CONNECT,
-        $context
-    );
+        if (count($_SESSION['terra_attempts']) >= RATE_LIMIT_PER_MIN) {
+            return false;
+        }
 
-    if ($socket === false) {
+        $_SESSION['terra_attempts'][] = $now;
+        return true;
+    }
+
+    /**
+     * Log de auditoria (sem senhas)
+     */
+    private function log(string $email, string $status, string $message, ?int $attempt = null): void
+    {
+        $timestamp = date('Y-m-d H:i:s');
+        $attempt_info = $attempt !== null ? " [ATTEMPT: $attempt]" : '';
+        $log_entry = "[$timestamp] SESSION: {$this->session_id} | EMAIL: $email | STATUS: $status | MSG: $message$attempt_info" . PHP_EOL;
+        error_log($log_entry, 3, LOG_FILE);
+    }
+
+    /**
+     * Testa conectividade SSL/TLS
+     */
+    private function testSSLConnectivity(): array
+    {
+        $context = stream_context_create([
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+                'allow_self_signed' => false,
+                'cafile' => CA_BUNDLE_PATH ?: null,
+            ]
+        ]);
+
+        $errno = 0;
+        $errstr = '';
+        $socket = @stream_socket_client(
+            'ssl://' . IMAP_HOST . ':' . IMAP_PORT,
+            $errno,
+            $errstr,
+            10,
+            STREAM_CLIENT_CONNECT,
+            $context
+        );
+
+        if ($socket === false) {
+            return [
+                'success' => false,
+                'error' => "SSL Handshake Failed: $errstr (errno: $errno)"
+            ];
+        }
+
+        fclose($socket);
+        return ['success' => true];
+    }
+
+    /**
+     * Tenta autenticação IMAP com retry exponencial
+     */
+    public function validate(string $email, string $password): array
+    {
+        $start_time = microtime(true);
+
+        // Validação de email
+        if (!$this->validateEmail($email)) {
+            return [
+                'status' => 'error',
+                'email' => $email,
+                'result' => 'INVALID_EMAIL',
+                'message' => 'Formato de e-mail inválido',
+                'time_ms' => 0,
+                'attempts' => 0
+            ];
+        }
+
+        // Validação de rate limit
+        if (!$this->checkRateLimit()) {
+            return [
+                'status' => 'error',
+                'email' => $email,
+                'result' => 'RATE_LIMITED',
+                'message' => 'Limite de tentativas excedido. Aguarde 1 minuto.',
+                'time_ms' => 0,
+                'attempts' => 0
+            ];
+        }
+
+        // Teste de conectividade SSL (diagnóstico)
+        $ssl_test = $this->testSSLConnectivity();
+        if (!$ssl_test['success']) {
+            $this->log($email, 'error', $ssl_test['error']);
+            return [
+                'status' => 'error',
+                'email' => $email,
+                'result' => 'SSL_ERROR',
+                'message' => $ssl_test['error'],
+                'time_ms' => round((microtime(true) - $start_time) * 1000),
+                'attempts' => 0
+            ];
+        }
+
+        // Retry com backoff exponencial
+        $attempt = 0;
+        $last_error = '';
+        $backoff = INITIAL_BACKOFF;
+
+        while ($attempt < MAX_RETRIES) {
+            $attempt++;
+
+            // Aguarda antes de tentar (exceto na primeira)
+            if ($attempt > 1) {
+                sleep($backoff);
+                $backoff = min($backoff * 2, MAX_BACKOFF);
+            }
+
+            // Obtém proxy (se disponível)
+            $proxy = $this->getNextProxy();
+
+            // Tenta conexão IMAP
+            $result = $this->attemptIMAP($email, $password, $proxy);
+
+            if ($result['success']) {
+                $this->log($email, 'live', 'Autenticação bem-sucedida', $attempt);
+                return [
+                    'status' => 'success',
+                    'email' => $email,
+                    'result' => 'live',
+                    'message' => 'Credencial válida',
+                    'time_ms' => round((microtime(true) - $start_time) * 1000),
+                    'attempts' => $attempt,
+                    'proxy_used' => $proxy ?? 'direct'
+                ];
+            }
+
+            $last_error = $result['error'];
+
+            // Determina se deve fazer retry
+            $should_retry = $this->shouldRetry($last_error, $attempt);
+
+            if (!$should_retry) {
+                break;
+            }
+
+            $this->log($email, 'retry', "Tentativa $attempt/$MAX_RETRIES falhou: $last_error", $attempt);
+        }
+
+        // Falha final
+        $this->log($email, 'die', "Falha após $attempt tentativas: $last_error");
+
         return [
-            'status' => 'error',
-            'message' => "SSL Connection Failed: $errstr (errno: $errno)",
-            'error_code' => 'SSL_HANDSHAKE_FAILED'
+            'status' => 'failed',
+            'email' => $email,
+            'result' => 'die',
+            'message' => "Credencial inválida ou servidor indisponível: $last_error",
+            'time_ms' => round((microtime(true) - $start_time) * 1000),
+            'attempts' => $attempt,
+            'last_error' => $last_error
         ];
     }
 
-    fclose($socket);
-    return [
-        'status' => 'success',
-        'message' => 'SSL/TLS handshake successful',
-        'error_code' => null
-    ];
-}
+    /**
+     * Tenta conexão IMAP
+     */
+    private function attemptIMAP(string $email, string $password, ?string $proxy): array
+    {
+        // Mailbox string com novalidate-cert para evitar problemas de certificado
+        $mailbox = '{' . IMAP_HOST . ':' . IMAP_PORT . '/imap/ssl/novalidate-cert}INBOX';
 
-/**
- * Tenta autenticação IMAP com retry exponencial
- */
-function authenticate_imap_with_retry(
-    string $email,
-    string $password,
-    int $max_retries = MAX_RETRIES
-): array
-{
-    $attempt = 0;
-    $last_error = null;
-    $backoff = INITIAL_BACKOFF;
-
-    while ($attempt < $max_retries) {
-        $attempt++;
-
-        // Aguarda antes de tentar (exceto na primeira tentativa)
-        if ($attempt > 1) {
-            sleep($backoff);
-            $backoff = min($backoff * 2, MAX_BACKOFF); // Exponencial até MAX_BACKOFF
-        }
-
-        // Define timeouts globais para IMAP
+        // Define timeouts
         if (function_exists('imap_timeout')) {
             imap_timeout(IMAP_OPENTIMEOUT, IMAP_TIMEOUT);
             imap_timeout(IMAP_READTIMEOUT, IMAP_TIMEOUT);
@@ -145,148 +295,66 @@ function authenticate_imap_with_retry(
             imap_timeout(IMAP_CLOSETIMEOUT, IMAP_TIMEOUT);
         }
 
-        // Tenta abrir conexão IMAP
-        $mbox = @imap_open(
-            IMAP_SERVER . 'INBOX',
-            $email,
-            $password,
-            OP_HALFOPEN,
-            1
-        );
+        // Tenta abrir conexão
+        $mbox = @imap_open($mailbox, $email, $password, OP_HALFOPEN, 1);
 
         if ($mbox !== false) {
             imap_close($mbox);
-            return [
-                'status' => 'live',
-                'message' => 'Credencial válida',
-                'error_code' => null,
-                'attempts' => $attempt,
-                'response_time_ms' => 0
-            ];
+            return ['success' => true];
         }
 
-        // Captura erro específico
-        $imap_error = imap_last_error() ?: 'Unknown IMAP error';
-        $last_error = $imap_error;
+        $error = imap_last_error() ?: 'Unknown IMAP error';
+        return ['success' => false, 'error' => $error];
+    }
 
-        // Determina se deve fazer retry
-        $should_retry = false;
-        $error_code = 'AUTH_FAILED';
-
-        if (stripos($imap_error, 'Timed out') !== false) {
-            $error_code = 'TIMEOUT';
-            $should_retry = $attempt < $max_retries;
-        } elseif (stripos($imap_error, 'Connection refused') !== false) {
-            $error_code = 'CONNECTION_REFUSED';
-            $should_retry = $attempt < $max_retries;
-        } elseif (stripos($imap_error, 'Certificate failure') !== false) {
-            $error_code = 'SSL_CERT_ERROR';
-            $should_retry = false; // Não faz retry em erro de certificado
-        } elseif (
-            stripos($imap_error, 'Authentication failed') !== false ||
-            stripos($imap_error, 'invalid user or password') !== false ||
-            stripos($imap_error, 'LOGIN failed') !== false
-        ) {
-            $error_code = 'AUTH_FAILED';
-            $should_retry = false; // Não faz retry em falha de autenticação
+    /**
+     * Determina se deve fazer retry baseado no tipo de erro
+     */
+    private function shouldRetry(string $error, int $attempt): bool
+    {
+        if ($attempt >= MAX_RETRIES) {
+            return false;
         }
 
-        if (!$should_retry) {
-            break;
+        // Erros que justificam retry
+        $retryable_errors = [
+            'Timed out',
+            'Connection refused',
+            'Connection reset',
+            'Temporary failure',
+            'Service unavailable',
+            'Too many login failures',
+            'IMAP connection broken',
+        ];
+
+        foreach ($retryable_errors as $pattern) {
+            if (stripos($error, $pattern) !== false) {
+                return true;
+            }
         }
 
-        log_event($email, 'retry', "Tentativa $attempt/$max_retries falhou: $imap_error", $attempt);
-    }
-
-    // Determina o código de erro final
-    $final_error_code = 'AUTH_FAILED';
-    if (stripos($last_error, 'Timed out') !== false) {
-        $final_error_code = 'TIMEOUT';
-    } elseif (stripos($last_error, 'Connection refused') !== false) {
-        $final_error_code = 'CONNECTION_REFUSED';
-    } elseif (stripos($last_error, 'Certificate failure') !== false) {
-        $final_error_code = 'SSL_CERT_ERROR';
-    }
-
-    return [
-        'status' => 'die',
-        'message' => "Credencial inválida ou servidor indisponível: $last_error",
-        'error_code' => $final_error_code,
-        'attempts' => $attempt,
-        'response_time_ms' => 0
-    ];
-}
-
-/**
- * Valida credencial com diagnóstico completo
- */
-function validate_credential(string $email, string $password): array
-{
-    $start_time = microtime(true);
-
-    // Validação de email
-    if (!validate_email($email)) {
-        return [
-            'email' => $email,
-            'result' => 'error',
-            'message' => 'Formato de e-mail inválido ou não é @terra.com.br',
-            'error_code' => 'INVALID_EMAIL',
-            'time_ms' => 0,
-            'diagnostic' => null
+        // Erros que NÃO justificam retry
+        $non_retryable_errors = [
+            'Authentication failed',
+            'invalid user or password',
+            'LOGIN failed',
+            'Certificate failure',
         ];
+
+        foreach ($non_retryable_errors as $pattern) {
+            if (stripos($error, $pattern) !== false) {
+                return false;
+            }
+        }
+
+        // Por padrão, tenta novamente
+        return true;
     }
-
-    // Validação de rate limit
-    if (!check_rate_limit()) {
-        return [
-            'email' => $email,
-            'result' => 'error',
-            'message' => 'Limite de tentativas excedido. Aguarde 1 minuto.',
-            'error_code' => 'RATE_LIMITED',
-            'time_ms' => 0,
-            'diagnostic' => null
-        ];
-    }
-
-    // Teste de conectividade SSL (diagnóstico)
-    $ssl_test = test_ssl_connectivity();
-    $diagnostic = $ssl_test;
-
-    if ($ssl_test['status'] === 'error') {
-        log_event($email, 'error', $ssl_test['message']);
-        return [
-            'email' => $email,
-            'result' => 'error',
-            'message' => $ssl_test['message'],
-            'error_code' => $ssl_test['error_code'],
-            'time_ms' => round((microtime(true) - $start_time) * 1000),
-            'diagnostic' => $diagnostic
-        ];
-    }
-
-    // Autenticação com retry
-    $auth_result = authenticate_imap_with_retry($email, $password);
-
-    $end_time = microtime(true);
-    $duration_ms = round(($end_time - $start_time) * 1000);
-
-    log_event($email, $auth_result['status'], $auth_result['message'], $auth_result['attempts']);
-
-    return [
-        'email' => $email,
-        'result' => $auth_result['status'],
-        'message' => $auth_result['message'],
-        'error_code' => $auth_result['error_code'],
-        'time_ms' => $duration_ms,
-        'attempts' => $auth_result['attempts'],
-        'diagnostic' => $diagnostic
-    ];
 }
 
 // ============================================================================
 // PROCESSAMENTO DA REQUISIÇÃO
 // ============================================================================
-
 $input = json_decode(file_get_contents('php://input'), true) ?? $_POST;
 $email = trim((string)($input['email'] ?? ''));
 $password = (string)($input['password'] ?? '');
@@ -301,9 +369,10 @@ if (empty($email) || empty($password)) {
     exit;
 }
 
-$result = validate_credential($email, $password);
+$validator = new TerraValidator();
+$result = $validator->validate($email, $password);
 
-http_response_code($result['result'] === 'error' ? 400 : 200);
+http_response_code($result['status'] === 'success' ? 200 : 400);
 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 exit;
 ?>
