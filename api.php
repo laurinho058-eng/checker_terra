@@ -37,14 +37,13 @@ function b64url(string $value): string
 
 function require_existing_session(): void
 {
-    if (isset($_SESSION['logged_in']) && $_SESSION['logged_in'] !== true) {
+    if (($_SESSION['logged_in'] ?? false) !== true) {
         json_response(['status' => 'error', 'message' => 'Unauthorized'], 401);
     }
 
     if (
-        isset($_SESSION['logged_in'], $_SESSION['role'], $_SESSION['expiration']) &&
-        $_SESSION['logged_in'] === true &&
-        $_SESSION['role'] !== 'admin' &&
+        ($_SESSION['role'] ?? '') !== 'admin' &&
+        isset($_SESSION['expiration']) &&
         time() > (int) $_SESSION['expiration']
     ) {
         json_response(['status' => 'error', 'message' => 'Plan expired'], 403);
