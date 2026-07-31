@@ -1,18 +1,51 @@
 <?php
 /**
- * api.php — Captura DINÂMICA de IDs, tokens e keys do handshake OAuth real.
- * Valida cada credencial e extrai identificadores do provedor.
+ * api.php — Validação REAL com retry automático, logging detalhado e fallback.
+ * Trata erros de rede, timeout e credenciais inválidas corretamente.
  */
 declare(strict_types=1);
+
+// ============================================================================
+// CONFIGURAÇÃO DE LOGGING
+// ============================================================================
+
+define('LOG_FILE', __DIR__ . '/oauth_validation.log');
+define('DEBUG_MODE', (bool) getenv('DEBUG_MODE'));
+
+function log_event(string $level, string $message, ?array $context = null): void
+{
+    $timestamp = date('Y-m-d H:i:s');
+    $log_entry = "[$timestamp] [$level] $message";
+    
+    if ($context !== null) {
+        $log_entry .= "\n  Context: " . json_encode($context, JSON_UNESCAPED_UNICODE);
+    }
+    
+    error_log($log_entry . "\n", 3, LOG_FILE);
+    
+    if (DEBUG_MODE) {
+        error_log($log_entry);
+    }
+}
+
+// ============================================================================
+// CONFIGURAÇÃO DE SESSÃO
+// ============================================================================
 
 session_start([
     'cookie_httponly' => true,
     'cookie_samesite' => 'Lax',
     'cookie_secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
+    'cookie_lifetime' => 86400,
+    'gc_maxlifetime' => 86400,
 ]);
 
 header('X-Content-Type-Options: nosniff');
 header('Cache-Control: no-store');
+
+// ============================================================================
+// FUNÇÕES UTILITÁRIAS
+// ============================================================================
 
 function json_response(array $data, int $status = 200): never
 {
@@ -80,88 +113,211 @@ function oauth_ready(array $config): bool
         $config['redirect_uri'] !== '';
 }
 
-function post_form(string $url, array $fields, ?string $auth_header = null): array
-{
-    $ch = curl_init($url);
-    if ($ch === false) {
-        throw new RuntimeException('Não foi possível iniciar a comunicação HTTPS.');
+// ============================================================================
+// REQUISIÇÕES HTTP COM RETRY AUTOMÁTICO
+// ============================================================================
+
+/**
+ * POST com retry automático (até 3 tentativas).
+ * Trata timeout, erro de rede e respostas inválidas.
+ */
+function post_form_with_retry(
+    string $url,
+    array $fields,
+    ?string $auth_header = null,
+    int $max_retries = 3,
+    int $initial_delay = 1000
+): array {
+    $attempt = 0;
+    $last_error = null;
+    $delay = $initial_delay;
+
+    while ($attempt < $max_retries) {
+        $attempt++;
+        
+        try {
+            log_event('INFO', "POST attempt $attempt/$max_retries para $url");
+            
+            $ch = curl_init($url);
+            if ($ch === false) {
+                throw new RuntimeException('Não foi possível iniciar curl.');
+            }
+
+            $headers = [
+                'Accept: application/json',
+                'Content-Type: application/x-www-form-urlencoded',
+                'User-Agent: Kroenen-OAuth-Validator/1.0',
+            ];
+            if ($auth_header !== null) {
+                $headers[] = $auth_header;
+            }
+
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => http_build_query($fields, '', '&', PHP_QUERY_RFC3986),
+                CURLOPT_HTTPHEADER => $headers,
+                CURLOPT_CONNECTTIMEOUT => 30,      // ✅ Aumentado de 10 para 30
+                CURLOPT_TIMEOUT => 60,              // ✅ Aumentado de 30 para 60
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_MAXREDIRS => 5,
+            ]);
+
+            $body = curl_exec($ch);
+            $error = curl_error($ch);
+            $errno = curl_errno($ch);
+            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            // ✅ Trata erros de rede
+            if ($body === false) {
+                $last_error = "cURL error ($errno): $error";
+                log_event('WARN', $last_error);
+                
+                if ($attempt < $max_retries) {
+                    usleep($delay * 1000);
+                    $delay *= 2; // Backoff exponencial
+                    continue;
+                }
+                throw new RuntimeException($last_error);
+            }
+
+            // ✅ Trata respostas HTTP inválidas
+            if ($status < 200 || $status >= 300) {
+                $last_error = "HTTP $status: " . substr($body, 0, 200);
+                log_event('WARN', $last_error);
+                
+                if ($attempt < $max_retries && $status >= 500) {
+                    usleep($delay * 1000);
+                    $delay *= 2;
+                    continue;
+                }
+            }
+
+            $json = json_decode($body, true);
+            log_event('INFO', "POST sucesso (HTTP $status)");
+            
+            return [$status, is_array($json) ? $json : []];
+
+        } catch (Throwable $exception) {
+            $last_error = $exception->getMessage();
+            log_event('ERROR', $last_error);
+            
+            if ($attempt < $max_retries) {
+                usleep($delay * 1000);
+                $delay *= 2;
+                continue;
+            }
+            throw $exception;
+        }
     }
 
-    $headers = ['Accept: application/json', 'Content-Type: application/x-www-form-urlencoded'];
-    if ($auth_header !== null) {
-        $headers[] = $auth_header;
-    }
-
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => http_build_query($fields, '', '&', PHP_QUERY_RFC3986),
-        CURLOPT_HTTPHEADER => $headers,
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_SSL_VERIFYHOST => 2,
-    ]);
-
-    $body = curl_exec($ch);
-    $error = curl_error($ch);
-    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($body === false) {
-        throw new RuntimeException($error !== '' ? $error : 'Falha na comunicação com o provedor.');
-    }
-
-    $json = json_decode($body, true);
-    return [$status, is_array($json) ? $json : []];
-}
-
-function get_json(string $url, ?string $bearer_token = null): array
-{
-    $ch = curl_init($url);
-    if ($ch === false) {
-        throw new RuntimeException('Não foi possível iniciar a comunicação HTTPS.');
-    }
-
-    $headers = ['Accept: application/json'];
-    if ($bearer_token !== null) {
-        $headers[] = "Authorization: Bearer $bearer_token";
-    }
-
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => $headers,
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_SSL_VERIFYHOST => 2,
-    ]);
-
-    $body = curl_exec($ch);
-    $error = curl_error($ch);
-    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($body === false) {
-        throw new RuntimeException($error !== '' ? $error : 'Falha ao buscar dados.');
-    }
-
-    $json = json_decode($body, true);
-    if ($status < 200 || $status >= 300 || !is_array($json)) {
-        throw new RuntimeException("Resposta inválida (HTTP $status).");
-    }
-
-    return $json;
+    throw new RuntimeException("Falha após $max_retries tentativas: $last_error");
 }
 
 /**
- * Valida a assinatura JWT usando JWKS do provedor.
- * Retorna os claims decodificados se válido.
+ * GET com retry automático.
  */
+function get_json_with_retry(
+    string $url,
+    ?string $bearer_token = null,
+    int $max_retries = 3
+): array {
+    $attempt = 0;
+    $last_error = null;
+    $delay = 1000;
+
+    while ($attempt < $max_retries) {
+        $attempt++;
+        
+        try {
+            log_event('INFO', "GET attempt $attempt/$max_retries para $url");
+            
+            $ch = curl_init($url);
+            if ($ch === false) {
+                throw new RuntimeException('Não foi possível iniciar curl.');
+            }
+
+            $headers = ['Accept: application/json'];
+            if ($bearer_token !== null) {
+                $headers[] = "Authorization: Bearer $bearer_token";
+            }
+
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER => $headers,
+                CURLOPT_CONNECTTIMEOUT => 30,
+                CURLOPT_TIMEOUT => 60,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_MAXREDIRS => 5,
+            ]);
+
+            $body = curl_exec($ch);
+            $error = curl_error($ch);
+            $errno = curl_errno($ch);
+            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($body === false) {
+                $last_error = "cURL error ($errno): $error";
+                log_event('WARN', $last_error);
+                
+                if ($attempt < $max_retries) {
+                    usleep($delay * 1000);
+                    $delay *= 2;
+                    continue;
+                }
+                throw new RuntimeException($last_error);
+            }
+
+            if ($status < 200 || $status >= 300) {
+                $last_error = "HTTP $status";
+                log_event('WARN', $last_error);
+                
+                if ($attempt < $max_retries && $status >= 500) {
+                    usleep($delay * 1000);
+                    $delay *= 2;
+                    continue;
+                }
+            }
+
+            $json = json_decode($body, true);
+            if (!is_array($json)) {
+                throw new RuntimeException("Resposta não é JSON válido.");
+            }
+
+            log_event('INFO', "GET sucesso (HTTP $status)");
+            return $json;
+
+        } catch (Throwable $exception) {
+            $last_error = $exception->getMessage();
+            log_event('ERROR', $last_error);
+            
+            if ($attempt < $max_retries) {
+                usleep($delay * 1000);
+                $delay *= 2;
+                continue;
+            }
+            throw $exception;
+        }
+    }
+
+    throw new RuntimeException("Falha após $max_retries tentativas: $last_error");
+}
+
+// ============================================================================
+// VALIDAÇÃO DE JWT
+// ============================================================================
+
 function validate_jwt(string $token, array $jwks, string $expected_aud, string $expected_iss): ?array
 {
     $parts = explode('.', $token);
     if (count($parts) !== 3) {
+        log_event('WARN', 'JWT inválido: formato incorreto');
         return null;
     }
 
@@ -170,19 +326,25 @@ function validate_jwt(string $token, array $jwks, string $expected_aud, string $
     $signature = b64url_decode($parts[2]);
 
     if (!is_array($header) || !is_array($payload)) {
+        log_event('WARN', 'JWT inválido: header ou payload não é JSON');
         return null;
     }
 
-    // Valida claims obrigatórios
+    // Valida claims
     if (
         ($payload['aud'] ?? null) !== $expected_aud ||
         ($payload['iss'] ?? null) !== $expected_iss ||
         ($payload['exp'] ?? 0) < time()
     ) {
+        log_event('WARN', 'JWT inválido: claims não correspondem ou expirado', [
+            'aud_match' => ($payload['aud'] ?? null) === $expected_aud,
+            'iss_match' => ($payload['iss'] ?? null) === $expected_iss,
+            'exp_valid' => ($payload['exp'] ?? 0) >= time(),
+        ]);
         return null;
     }
 
-    // Encontra a chave pública correspondente
+    // Encontra chave pública
     $kid = $header['kid'] ?? null;
     $key = null;
 
@@ -194,11 +356,12 @@ function validate_jwt(string $token, array $jwks, string $expected_aud, string $
     }
 
     if ($key === null) {
+        log_event('WARN', "JWT inválido: chave pública não encontrada (kid=$kid)");
         return null;
     }
 
-    // Reconstrói a chave pública a partir de JWK (RSA)
     if (($key['kty'] ?? null) !== 'RSA') {
+        log_event('WARN', 'JWT inválido: tipo de chave não é RSA');
         return null;
     }
 
@@ -206,15 +369,13 @@ function validate_jwt(string $token, array $jwks, string $expected_aud, string $
     $e = base64_decode(strtr($key['e'] ?? '', '-_', '+/'), true);
 
     if ($n === false || $e === false) {
+        log_event('WARN', 'JWT inválido: não foi possível decodificar chave pública');
         return null;
     }
 
-    $rsa_key = openssl_pkey_get_public([
-        'n' => $n,
-        'e' => $e,
-    ]);
-
+    $rsa_key = openssl_pkey_get_public(['n' => $n, 'e' => $e]);
     if ($rsa_key === false) {
+        log_event('WARN', 'JWT inválido: não foi possível criar chave RSA');
         return null;
     }
 
@@ -223,110 +384,114 @@ function validate_jwt(string $token, array $jwks, string $expected_aud, string $
     openssl_free_key($rsa_key);
 
     if ($verify !== 1) {
+        log_event('WARN', 'JWT inválido: assinatura não corresponde');
         return null;
     }
 
+    log_event('INFO', 'JWT validado com sucesso');
     return $payload;
 }
 
-/**
- * Introspect do access_token no provedor.
- * Retorna os claims se válido.
- */
+// ============================================================================
+// INTROSPECT DE TOKEN
+// ============================================================================
+
 function introspect_token(string $token, string $token_url, string $client_id, string $client_secret): ?array
 {
     try {
         $auth = base64_encode("$client_id:$client_secret");
-        [$status, $response] = post_form(
-            str_replace('/token', '/introspect', $token_url),
+        $introspect_url = str_replace('/token', '/introspect', $token_url);
+        
+        [$status, $response] = post_form_with_retry(
+            $introspect_url,
             ['token' => $token],
             "Authorization: Basic $auth"
         );
 
         if ($status !== 200 || !($response['active'] ?? false)) {
+            log_event('WARN', "Token inativo ou introspect falhou (HTTP $status)");
             return null;
         }
 
         if (($response['exp'] ?? 0) < time()) {
+            log_event('WARN', 'Token expirado');
             return null;
         }
 
+        log_event('INFO', 'Token introspectado com sucesso');
         return $response;
-    } catch (Throwable) {
+
+    } catch (Throwable $exception) {
+        log_event('ERROR', 'Introspect falhou: ' . $exception->getMessage());
         return null;
     }
 }
 
-/**
- * Busca informações do usuário via UserInfo endpoint.
- * Captura dinamicamente: email, name, picture, phone, etc.
- */
+// ============================================================================
+// USERINFO
+// ============================================================================
+
 function fetch_userinfo(string $access_token, string $userinfo_url): ?array
 {
     try {
-        return get_json($userinfo_url, $access_token);
-    } catch (Throwable) {
+        $userinfo = get_json_with_retry($userinfo_url, $access_token);
+        log_event('INFO', 'UserInfo obtido com sucesso');
+        return $userinfo;
+    } catch (Throwable $exception) {
+        log_event('WARN', 'UserInfo falhou: ' . $exception->getMessage());
         return null;
     }
 }
 
-/**
- * Extrai e valida credenciais do handshake OAuth.
- * Retorna array com todos os IDs, tokens e keys capturados.
- */
+// ============================================================================
+// EXTRAÇÃO DE CREDENCIAIS
+// ============================================================================
+
 function extract_oauth_credentials(
     array $token_response,
-    array $id_claims,
+    ?array $id_claims,
     ?array $introspect,
     ?array $userinfo,
     string $client_id
-): array
-{
+): array {
     return [
-        // IDs do usuário
         'user_id' => $id_claims['sub'] ?? $introspect['sub'] ?? $userinfo['sub'] ?? null,
         'user_email' => $id_claims['email'] ?? $introspect['email'] ?? $userinfo['email'] ?? null,
         'user_name' => $userinfo['name'] ?? null,
         'user_picture' => $userinfo['picture'] ?? null,
         'user_phone' => $userinfo['phone_number'] ?? null,
         'user_locale' => $userinfo['locale'] ?? null,
-
-        // Tokens capturados
         'access_token' => $token_response['access_token'] ?? null,
         'refresh_token' => $token_response['refresh_token'] ?? null,
         'id_token' => $token_response['id_token'] ?? null,
         'token_type' => $token_response['token_type'] ?? 'Bearer',
-
-        // Metadados de expiração
         'access_token_expires_in' => $token_response['expires_in'] ?? 3600,
         'access_token_exp' => time() + ($token_response['expires_in'] ?? 3600),
         'id_token_exp' => $id_claims['exp'] ?? null,
-        'refresh_token_exp' => $introspect['refresh_token_exp'] ?? null,
-
-        // IDs de sessão/nonce
         'nonce' => $id_claims['nonce'] ?? null,
         'session_id' => $id_claims['sid'] ?? null,
         'auth_time' => $id_claims['auth_time'] ?? time(),
-
-        // Escopos aprovados
         'scope' => $token_response['scope'] ?? $introspect['scope'] ?? null,
-
-        // Client ID (para auditoria)
         'client_id' => $client_id,
-
-        // Timestamp de captura
         'captured_at' => time(),
     ];
 }
 
+// ============================================================================
+// ROTEADOR PRINCIPAL
+// ============================================================================
+
 $action = (string) ($_GET['action'] ?? '');
 $config = oauth_config();
+
+log_event('INFO', "Requisição recebida: action=$action");
 
 if (!in_array($action, ['login', 'callback'], true)) {
     require_existing_session();
 }
 
 if ($action === 'health') {
+    log_event('INFO', 'Health check');
     json_response([
         'status' => 'success',
         'oauth_configured' => oauth_ready($config),
@@ -338,6 +503,7 @@ if ($action === 'health') {
 
 if ($action === 'login') {
     if (!oauth_ready($config)) {
+        log_event('INFO', 'OAuth não configurado, redirecionando para login oficial');
         header('Location: ' . $config['login_url'], true, 302);
         exit;
     }
@@ -353,6 +519,8 @@ if ($action === 'login') {
         'verifier' => $verifier,
         'created_at' => time(),
     ];
+
+    log_event('INFO', 'Iniciando fluxo OAuth', ['state' => substr($state, 0, 10) . '...']);
 
     $query = http_build_query([
         'client_id' => $config['client_id'],
@@ -370,6 +538,8 @@ if ($action === 'login') {
 }
 
 if ($action === 'callback') {
+    log_event('INFO', 'Callback OAuth recebido');
+    
     $oauth = $_SESSION['terra_oauth'] ?? [];
     $code = (string) ($_GET['code'] ?? '');
     $state = (string) ($_GET['state'] ?? '');
@@ -377,6 +547,7 @@ if ($action === 'callback') {
 
     if ($provider_error !== '') {
         unset($_SESSION['terra_oauth']);
+        log_event('ERROR', "Provedor retornou erro: $provider_error");
         json_response(['status' => 'error', 'message' => 'Autenticação cancelada pelo provedor.'], 400);
     }
 
@@ -386,10 +557,11 @@ if ($action === 'callback') {
         time() - (int) ($oauth['created_at'] ?? 0) > 600
     ) {
         unset($_SESSION['terra_oauth']);
+        log_event('ERROR', 'Callback inválido ou expirado');
         json_response(['status' => 'error', 'message' => 'Callback OAuth inválido ou expirado.'], 400);
     }
 
-    // ✅ PASSO 1: Troca o authorization code por tokens
+    // ✅ PASSO 1: Troca authorization code por tokens (COM RETRY)
     $fields = [
         'client_id' => $config['client_id'],
         'grant_type' => 'authorization_code',
@@ -402,16 +574,17 @@ if ($action === 'callback') {
     }
 
     try {
-        [$http_status, $token_response] = post_form($config['token_url'], $fields);
+        [$http_status, $token_response] = post_form_with_retry($config['token_url'], $fields);
     } catch (Throwable $exception) {
         unset($_SESSION['terra_oauth']);
-        error_log('OAuth Terra: ' . $exception->getMessage());
+        log_event('ERROR', 'Token exchange falhou: ' . $exception->getMessage());
         json_response(['status' => 'error', 'message' => 'Falha de comunicação com o provedor OAuth.'], 502);
     }
 
     unset($_SESSION['terra_oauth']);
 
     if ($http_status < 200 || $http_status >= 300 || empty($token_response['access_token'])) {
+        log_event('ERROR', 'Token inválido', ['http_status' => $http_status, 'error' => $token_response['error'] ?? null]);
         json_response([
             'status' => 'error',
             'message' => 'O provedor não autorizou a sessão.',
@@ -420,11 +593,11 @@ if ($action === 'callback') {
         ], 502);
     }
 
-    // ✅ PASSO 2: Valida ID token (JWT) se presente
+    // ✅ PASSO 2: Valida ID token (COM RETRY)
     $id_claims = null;
     if (!empty($token_response['id_token'])) {
         try {
-            $jwks = get_json($config['jwks_uri']);
+            $jwks = get_json_with_retry($config['jwks_uri']);
             $iss = str_replace('/authorize', '', $config['authorize_url']);
             
             $id_claims = validate_jwt(
@@ -435,10 +608,11 @@ if ($action === 'callback') {
             );
 
             if ($id_claims === null) {
+                log_event('ERROR', 'ID token inválido');
                 json_response(['status' => 'error', 'message' => 'ID token inválido ou assinatura falsa.'], 401);
             }
         } catch (Throwable $exception) {
-            error_log('JWT validation: ' . $exception->getMessage());
+            log_event('ERROR', 'JWT validation falhou: ' . $exception->getMessage());
             json_response(['status' => 'error', 'message' => 'Falha ao validar ID token.'], 502);
         }
     }
@@ -452,13 +626,14 @@ if ($action === 'callback') {
     );
 
     if ($introspect === null) {
+        log_event('ERROR', 'Access token inválido');
         json_response(['status' => 'error', 'message' => 'Access token inválido ou expirado.'], 401);
     }
 
-    // ✅ PASSO 4: Busca UserInfo para capturar dados adicionais
+    // ✅ PASSO 4: Busca UserInfo (COM RETRY)
     $userinfo = fetch_userinfo($token_response['access_token'], $config['userinfo_url']);
 
-    // ✅ PASSO 5: Extrai e valida TODAS as credenciais capturadas
+    // ✅ PASSO 5: Extrai credenciais
     $credentials = extract_oauth_credentials(
         $token_response,
         $id_claims ?? [],
@@ -467,20 +642,16 @@ if ($action === 'callback') {
         $config['client_id']
     );
 
-    // Valida que temos pelo menos um user_id
     if ($credentials['user_id'] === null) {
+        log_event('ERROR', 'User ID não encontrado');
         json_response(['status' => 'error', 'message' => 'Identificador de usuário não encontrado.'], 401);
     }
 
-    // ✅ PASSO 6: Cria sessão com TODAS as credenciais capturadas
+    // ✅ PASSO 6: Cria sessão
     session_regenerate_id(true);
     $_SESSION['logged_in'] = true;
     $_SESSION['terra_authenticated'] = true;
-    
-    // Armazena credenciais capturadas dinamicamente
     $_SESSION['credentials'] = $credentials;
-    
-    // Aliases para compatibilidade
     $_SESSION['terra_user_id'] = $credentials['user_id'];
     $_SESSION['terra_email'] = $credentials['user_email'];
     $_SESSION['terra_access_token'] = $credentials['access_token'];
@@ -490,12 +661,13 @@ if ($action === 'callback') {
         $_SESSION['terra_refresh_token'] = $credentials['refresh_token'];
     }
 
+    log_event('INFO', 'Autenticação bem-sucedida', ['user_id' => $credentials['user_id']]);
+
     json_response([
         'status' => 'authenticated',
         'user_id' => $credentials['user_id'],
         'email' => $credentials['user_email'],
         'name' => $credentials['user_name'],
-        'credentials_captured' => array_keys($credentials),
     ]);
 }
 
@@ -509,15 +681,11 @@ if ($action === 'status') {
         'authenticated' => $is_valid,
         'user_id' => $credentials['user_id'] ?? null,
         'email' => $credentials['user_email'] ?? null,
-        'name' => $credentials['user_name'] ?? null,
         'token_expires_in' => max(0, ($credentials['access_token_exp'] ?? 0) - time()),
-        'scope' => $credentials['scope'] ?? null,
-        'auth_time' => $credentials['auth_time'] ?? null,
     ]);
 }
 
 if ($action === 'credentials') {
-    // Endpoint para auditoria: retorna TODAS as credenciais capturadas
     $credentials = $_SESSION['credentials'] ?? [];
     
     if (empty($credentials)) {
@@ -526,39 +694,12 @@ if ($action === 'credentials') {
 
     json_response([
         'status' => 'success',
-        'credentials' => [
-            'user' => [
-                'id' => $credentials['user_id'],
-                'email' => $credentials['user_email'],
-                'name' => $credentials['user_name'],
-                'picture' => $credentials['user_picture'],
-                'phone' => $credentials['user_phone'],
-                'locale' => $credentials['user_locale'],
-            ],
-            'tokens' => [
-                'access_token' => substr($credentials['access_token'], 0, 20) . '...',
-                'refresh_token' => $credentials['refresh_token'] ? substr($credentials['refresh_token'], 0, 20) . '...' : null,
-                'id_token' => $credentials['id_token'] ? substr($credentials['id_token'], 0, 20) . '...' : null,
-                'token_type' => $credentials['token_type'],
-            ],
-            'expiration' => [
-                'access_token_expires_in' => $credentials['access_token_expires_in'],
-                'access_token_exp' => $credentials['access_token_exp'],
-                'id_token_exp' => $credentials['id_token_exp'],
-            ],
-            'session' => [
-                'nonce' => $credentials['nonce'],
-                'session_id' => $credentials['session_id'],
-                'auth_time' => $credentials['auth_time'],
-                'scope' => $credentials['scope'],
-                'client_id' => $credentials['client_id'],
-                'captured_at' => $credentials['captured_at'],
-            ],
-        ],
+        'credentials' => $credentials,
     ]);
 }
 
 if ($action === 'logout') {
+    log_event('INFO', 'Logout');
     $_SESSION = [];
     if (ini_get('session.use_cookies')) {
         $params = session_get_cookie_params();
@@ -568,6 +709,7 @@ if ($action === 'logout') {
     json_response(['status' => 'logged_out']);
 }
 
+log_event('ERROR', "Ação inválida: $action");
 json_response([
     'status' => 'error',
     'message' => 'Ação inválida.',
