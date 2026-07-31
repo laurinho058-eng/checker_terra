@@ -221,7 +221,7 @@ $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : d
 
 <main>
     <div class="hero">
-        <h1>Checker <span>Hotmail</span></h1>
+        <h1>Checker <span>TERRA</span></h1>
         <p>Kroenen Automation Engine · OAuth2 TERRA Validator</p>
     </div>
 
