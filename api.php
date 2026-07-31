@@ -20,8 +20,8 @@ $version = 'BETA 8K - SYSTEM CORE';
 $debug = false;
 
 // Configs fixas do OAuth2
-$client_id = 'seu_client_id_terra'; // Obter no painel de desenvolvedor do Terra
-$scope = 'https://mail.terra.com.br/.default email profile offline_access';
+$client_id = 'terraform-' . hash('crc32', $email); // Ex: terraform-123456789
+$scope = 'https://mail.terra.com.br/.default email profile offline_access'; // Obter no painel de desenvolvedor do Terra
 $nonce = 'nonce_aleatorio_32_bytes'; // Gere um novo nonce válido
 $code_challenge = 'code_challenge_gerado'; // Gere via S256 (SHA256 do code_verifier)
 $state = base64_encode(random_bytes(32));
@@ -68,7 +68,7 @@ if ($action === 'check') {
     
     // OAUTH2 MOBILE ENDPOINT - Simulação do aplicativo de e-mail (Android/iOS)
     // Esse endpoint é imune ao ReCaptcha e PerimeterX
-    $url = 'https://mail.terra.com.br/oauth/token'; // Endpoint OAuth2 do Terra
+    $url = 'https://auth.terra.com.br/oauth2/token'; // Endpoint OAuth2 do Terra
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
