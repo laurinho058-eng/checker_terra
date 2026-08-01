@@ -7,7 +7,6 @@ header('Access-Control-Allow-Origin: *');
 
 $action = $_GET['action'] ?? '';
 
-// ── INIT ──
 if ($action === 'init') {
     $proxies = [];
     $proxyFile = __DIR__ . '/proxies.txt';
@@ -28,16 +27,14 @@ if ($action === 'init') {
     exit;
 }
 
-// ── TEST_PROXY — testa HTTPS (não IMAP) ──
 if ($action === 'test_proxy') {
     $proxy = $_POST['proxy'] ?? '';
-    if (empty($proxy)) { echo json_encode(['status' => 'fail', 'message' => 'Proxy vazio']); exit; }
+    if (empty($proxy)) { echo json_encode(['status' => 'fail']); exit; }
     $ok = testProxyConnection($proxy);
-    echo json_encode(['status' => $ok ? 'ok' : 'fail', 'proxy' => $proxy]);
+    echo json_encode(['status' => $ok ? 'ok' : 'fail']);
     exit;
 }
 
-// ── CHECK ──
 if ($action === 'check') {
     $email = $_POST['email'] ?? '';
     $password = $_POST['password'] ?? '';
@@ -57,10 +54,6 @@ if ($action === 'check') {
 echo json_encode(['status' => 'ok']);
 exit;
 
-// ═══════════════════════════════════════
-//  PROXY
-// ═══════════════════════════════════════
-
 function fetchProxiesFromApi(string $url): array {
     $proxies = [];
     if (extension_loaded('curl')) {
@@ -78,12 +71,8 @@ function fetchProxiesFromApi(string $url): array {
     return $proxies;
 }
 
-// CORREÇÃO: testa HTTPS (api.ipify.org) em vez de IMAP
-// O proxy SOCKS5 pode funcionar para HTTPS mas falhar para IMAP porta 993
-// O teste valida apenas se o proxy está vivo e as credenciais estão corretas
 function testProxyConnection(string $proxy): bool {
     if (!extension_loaded('curl')) return false;
-
     $ch = curl_init();
     $opts = [
         CURLOPT_URL => 'https://api.ipify.org/',
@@ -97,18 +86,9 @@ function testProxyConnection(string $proxy): bool {
     ];
     applyProxyOpts($proxy, $opts);
     curl_setopt_array($ch, $opts);
-
     $result = curl_exec($ch);
-    $errno = curl_errno($ch);
-    $err = curl_error($ch);
     curl_close($ch);
-
-    // Se recebeu qualquer resposta (um IP), o proxy funciona
-    if ($result !== false && strlen(trim($result)) > 0) {
-        return true;
-    }
-
-    return false;
+    return ($result !== false && strlen(trim($result)) > 0);
 }
 
 function applyProxyOpts(string $proxy, array &$opts): void {
@@ -128,7 +108,7 @@ function applyProxyOpts(string $proxy, array &$opts): void {
 }
 
 // ═══════════════════════════════════════
-//  VALIDAÇÃO — 5 TENTATIVAS COM DELAYS CRESCENTES
+//  VALIDAÇÃO — TENTA COM PROXY, DEPOIS SEM PROXY
 // ═══════════════════════════════════════
 
 function doValidate(string $email, string $password, string $proxy = ''): array {
@@ -138,15 +118,21 @@ function doValidate(string $email, string $password, string $proxy = ''): array 
     for ($attempt = 0; $attempt < 5; $attempt++) {
         if ($delays[$attempt] > 0) usleep($delays[$attempt]);
 
-        if (extension_loaded('curl')) {
+        // COM proxy (se tiver)
+        if (!empty($proxy) && extension_loaded('curl')) {
             $r = tryCurl($email, $password, $timeout, $proxy);
             if ($r !== null) return $r;
         }
 
-        if (empty($proxy)) {
-            $r = trySocket($email, $password, $timeout);
+        // SEM proxy (sempre tenta direto)
+        if (extension_loaded('curl')) {
+            $r = tryCurl($email, $password, $timeout, '');
             if ($r !== null) return $r;
         }
+
+        // Socket direto (sem proxy)
+        $r = trySocket($email, $password, $timeout);
+        if ($r !== null) return $r;
     }
 
     return ['status' => 'die', 'email' => $email, 'reason' => 'Connection failed', 'retry_exhausted' => true];
