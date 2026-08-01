@@ -1,1 +1,1 @@
-http://1e8bbc1522820a8c71e0:9725f57c6811ab27@gw.dataimpulse.com:823
+socks5://1e8bbc1522820a8c71e0:9725f57c6811ab27@gw.dataimpulse.com:824
