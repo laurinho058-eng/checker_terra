@@ -56,10 +56,9 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 .upload-zone svg{width:32px;height:32px;stroke:var(--muted);stroke-width:1.5;fill:none;margin-bottom:.6rem}
 .upload-zone p{font-size:.85rem;color:var(--muted)}
 .upload-zone strong{color:var(--text)}
-.upload-zone input[type=file]{display:none}
 .file-name{font-size:.82rem;color:var(--accent-hi);margin-top:.4rem;font-weight:500}
 .run-row{display:flex;gap:1rem;align-items:center}
-.btn-start{flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;cursor:pointer;transition:opacity .2s,transform:.15s,box-shadow:.2s;box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem}
+.btn-start{flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;cursor:pointer;transition:opacity .2s,transform:.15s,box-shadow .2s;box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem}
 .btn-start:hover:not(:disabled){opacity:.9;transform:translateY(-1px);box-shadow:0 8px 28px rgba(124,58,237,.45)}
 .btn-start:disabled{opacity:.45;cursor:not-allowed}
 .btn-start svg{width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
@@ -120,12 +119,13 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 </div>
 <div class="control-panel">
 <div class="cp-title">⚡ Controle de Inspeção</div>
-<div class="upload-zone" id="uploadZone" onclick="document.getElementById('listFile').click()">
+<!-- CORRIGIDO: input file FORA da div upload-zone para evitar double-click -->
+<input type="file" id="listFile" accept=".txt" style="display:none">
+<div class="upload-zone" id="uploadZone">
 <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
 <p><strong>Clique para enviar</strong> ou arraste o arquivo aqui</p>
 <p style="font-size:.76rem;margin-top:.3rem">Formato: email:senha · .txt</p>
 <div class="file-name" id="fileName"></div>
-<input type="file" id="listFile" accept=".txt">
 </div>
 <div class="run-row"><button id="startBtn" class="btn-start" onclick="startChecker()"><svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg> Iniciar Inspeção</button></div>
 <div class="progress-wrap"><div class="progress-bar-bg"><div id="progressBar" class="progress-bar"></div></div><div class="progress-label"><span id="statusText">Sistema pronto · aguardando arquivo</span><span id="progressPct">0%</span></div></div>
@@ -137,45 +137,183 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 </main>
 <script>
 function logout(){fetch('auth.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=logout'}).then(function(){window.location.href='login.html';});}
+
+// CORRIGIDO: upload zone separada do input file
 var zone=document.getElementById('uploadZone');
 var fileInput=document.getElementById('listFile');
-fileInput.addEventListener('change',function(){if(fileInput.files[0])document.getElementById('fileName').textContent='\uD83D\uDCC4 '+fileInput.files[0].name;});
+
+zone.addEventListener('click',function(){
+    fileInput.click();
+});
+
+fileInput.addEventListener('change',function(){
+    if(fileInput.files && fileInput.files[0]){
+        document.getElementById('fileName').textContent=fileInput.files[0].name+' selecionado';
+        document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';
+    }
+});
+
 zone.addEventListener('dragover',function(e){e.preventDefault();zone.classList.add('dragover');});
 zone.addEventListener('dragleave',function(){zone.classList.remove('dragover');});
-zone.addEventListener('drop',function(e){e.preventDefault();zone.classList.remove('dragover');var dt=e.dataTransfer;if(dt.files[0]){fileInput.files=dt.files;document.getElementById('fileName').textContent='\uD83D\uDCC4 '+dt.files[0].name;}});
-var accounts=[],proxies=[],currentIndex=0,liveCount=0,dieCount=0,isRunning=false,allResults=[];
-var THREADS=3;
-function readFile(file){return new Promise(function(resolve,reject){var reader=new FileReader();reader.onload=function(e){resolve(e.target.result);};reader.onerror=function(){reject(new Error('Erro ao ler arquivo'));};reader.readAsText(file);});}
-async function startChecker(){
-if(isRunning)return;
-if(!fileInput.files||fileInput.files.length===0){alert('Anexe o arquivo .txt com a lista email:senha.');return;}
-var btn=document.getElementById('startBtn');
-btn.disabled=true;
-btn.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Carregando...';
-try{
-try{var res=await fetch('api.php?action=init');var d=await res.json();proxies=d.proxies||[];}catch(e){proxies=[];}
-var text=await readFile(fileInput.files[0]);
-accounts=[];
-var lines=text.split(/\r?\n/);
-for(var i=0;i<lines.length;i++){var line=lines[i].trim();if(line&&line.indexOf(':')>-1){var p=line.split(':');var em=p[0].trim();var pw=p.slice(1).join(':').trim();if(em.indexOf('@')>-1)accounts.push({email:em,password:pw});}}
-if(!accounts.length){alert('Nenhuma conta valida encontrada!');resetUI();return;}
-isRunning=true;currentIndex=0;liveCount=0;dieCount=0;allResults=[];
-document.getElementById('liveList').innerHTML='';
-document.getElementById('dieList').innerHTML='';
-document.getElementById('statTotal').textContent=accounts.length;
-updateCounts();
-btn.innerHTML='\u23F3 Inspecionando...';
-var workers=[];
-for(var j=0;j<THREADS;j++)workers.push(worker());
-await Promise.all(workers);
-document.getElementById('statusText').textContent='\u2705 Concluido! '+accounts.length+' targets processados.';
-btn.innerHTML='\u2714 Processo Finalizado';
-}catch(err){console.error('startChecker error:',err);resetUI();}
+zone.addEventListener('drop',function(e){
+    e.preventDefault();zone.classList.remove('dragover');
+    if(e.dataTransfer.files && e.dataTransfer.files[0]){
+        fileInput.files=e.dataTransfer.files;
+        document.getElementById('fileName').textContent=e.dataTransfer.files[0].name+' selecionado';
+        document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';
+    }
+});
+
+var accounts=[],currentIndex=0,liveCount=0,dieCount=0,isRunning=false,allResults=[];
+var THREADS=2;
+var DELAY_BETWEEN_CHECKS=800;
+
+function readFile(file){
+    return new Promise(function(resolve,reject){
+        var reader=new FileReader();
+        reader.onload=function(e){resolve(e.target.result);};
+        reader.onerror=function(){reject(new Error('Erro ao ler arquivo'));};
+        reader.readAsText(file);
+    });
 }
-function resetUI(){
-isRunning=false;
-var btn=document.getElementById('startBtn');
-btn.disabled=false;
-btn.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Iniciar Inspeção';
-document.getElementById('statusText').textContent='Sistema pronto · aguardando arquivo';
-document.getElementById('progressBar').style.width='0%';
+
+function sleep(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});}
+
+async function startChecker(){
+    if(isRunning)return;
+    if(!fileInput.files||fileInput.files.length===0){
+        alert('Selecione um arquivo .txt primeiro.');
+        return;
+    }
+
+    var btn=document.getElementById('startBtn');
+    btn.disabled=true;
+    btn.innerHTML='Carregando lista...';
+
+    try{
+        var text=await readFile(fileInput.files[0]);
+        accounts=[];
+        var lines=text.split(/\r?\n/);
+        for(var i=0;i<lines.length;i++){
+            var line=lines[i].trim();
+            if(line && line.indexOf(':')>-1){
+                var idx=line.indexOf(':');
+                var em=line.substring(0,idx).trim();
+                var pw=line.substring(idx+1).trim();
+                if(em.indexOf('@')>-1 && pw.length>0){
+                    accounts.push({email:em,password:pw});
+                }
+            }
+        }
+
+        if(!accounts.length){
+            alert('Nenhuma conta valida encontrada no arquivo.');
+            btn.disabled=false;
+            btn.innerHTML='Iniciar Inspeção';
+            return;
+        }
+
+        document.getElementById('statTotal').textContent=accounts.length;
+        document.getElementById('statusText').textContent=accounts.length+' contas carregadas · iniciando...';
+        document.getElementById('fileName').textContent=accounts.length+' contas · '+fileInput.files[0].name;
+
+        isRunning=true;
+        currentIndex=0;
+        liveCount=0;
+        dieCount=0;
+        allResults=[];
+        document.getElementById('liveList').innerHTML='';
+        document.getElementById('dieList').innerHTML='';
+        updateCounts();
+        btn.innerHTML='Inspecionando...';
+
+        var workers=[];
+        for(var j=0;j<THREADS;j++)workers.push(worker());
+        await Promise.all(workers);
+
+        document.getElementById('statusText').textContent='Concluido! '+accounts.length+' contas · '+liveCount+' live · '+dieCount+' dead';
+        btn.innerHTML='Processo Finalizado';
+    }catch(err){
+        console.error('Erro:',err);
+        document.getElementById('statusText').textContent='Erro: '+err.message;
+        btn.disabled=false;
+        btn.innerHTML='Iniciar Inspeção';
+        isRunning=false;
+    }
+}
+
+async function worker(){
+    while(currentIndex<accounts.length){
+        var idx=currentIndex++;
+        var ac=accounts[idx];
+
+        await checkAccount(ac.email,ac.password);
+
+        var checked=liveCount+dieCount;
+        var pct=Math.round((checked/accounts.length)*100);
+        document.getElementById('progressBar').style.width=pct+'%';
+        document.getElementById('progressPct').textContent=pct+'%';
+        document.getElementById('statusText').textContent='Inspecionando '+checked+' / '+accounts.length+'...';
+
+        // DELAY entre checagens para evitar rate limit
+        if(currentIndex<accounts.length){
+            await sleep(DELAY_BETWEEN_CHECKS);
+        }
+    }
+}
+
+async function checkAccount(email,password){
+    var fd=new FormData();
+    fd.append('email',email);
+    fd.append('password',password);
+    try{
+        var res=await fetch('api.php?action=check',{method:'POST',body:fd});
+        var r=await res.json();
+        allResults.push({email:email,password:password,status:r.status});
+        if(r.status==='live'){
+            liveCount++;
+            addToList('liveList',email+':'+password,'live-text');
+        }else{
+            dieCount++;
+            addToList('dieList',email+':'+password+' · '+(r.reason||'die'),'die-text');
+        }
+        updateCounts();
+    }catch(e){
+        allResults.push({email:email,password:password,status:'die'});
+        dieCount++;
+        addToList('dieList',email+':'+password+' · ERROR','die-text');
+        updateCounts();
+    }
+}
+
+function addToList(id,text,cls){
+    var el=document.getElementById(id);
+    var div=document.createElement('div');
+    div.className=cls;
+    div.textContent=text;
+    el.appendChild(div);
+    el.scrollTop=el.scrollHeight;
+}
+
+function updateCounts(){
+    document.getElementById('liveCount').textContent=liveCount;
+    document.getElementById('dieCount').textContent=dieCount;
+    document.getElementById('statLive').textContent=liveCount;
+    document.getElementById('statDie').textContent=dieCount;
+}
+
+function downloadResults(type){
+    var filtered=type==='lives'?allResults.filter(function(r){return r.status==='live';}):allResults.filter(function(r){return r.status!=='live';});
+    if(filtered.length===0){alert('Nenhum resultado para exportar');return;}
+    var text=filtered.map(function(r){return r.email+':'+r.password;}).join('\n');
+    var blob=new Blob([text],{type:'text/plain'});
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=type+'.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+</script>
+</body>
+</html>
