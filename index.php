@@ -59,7 +59,7 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 .upload-zone input[type=file]{display:none}
 .file-name{font-size:.82rem;color:var(--accent-hi);margin-top:.4rem;font-weight:500}
 .run-row{display:flex;gap:1rem;align-items:center}
-.btn-start{flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;cursor:pointer;transition:opacity .2s,transform .15s,box-shadow .2s;box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem}
+.btn-start{flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;cursor:pointer;transition:opacity .2s,transform:.15s,box-shadow:.2s;box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem}
 .btn-start:hover:not(:disabled){opacity:.9;transform:translateY(-1px);box-shadow:0 8px 28px rgba(124,58,237,.45)}
 .btn-start:disabled{opacity:.45;cursor:not-allowed}
 .btn-start svg{width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
@@ -144,7 +144,7 @@ zone.addEventListener('dragover',function(e){e.preventDefault();zone.classList.a
 zone.addEventListener('dragleave',function(){zone.classList.remove('dragover');});
 zone.addEventListener('drop',function(e){e.preventDefault();zone.classList.remove('dragover');var dt=e.dataTransfer;if(dt.files[0]){fileInput.files=dt.files;document.getElementById('fileName').textContent='\uD83D\uDCC4 '+dt.files[0].name;}});
 var accounts=[],proxies=[],currentIndex=0,liveCount=0,dieCount=0,isRunning=false,allResults=[];
-var THREADS=6;
+var THREADS=3;
 function readFile(file){return new Promise(function(resolve,reject){var reader=new FileReader();reader.onload=function(e){resolve(e.target.result);};reader.onerror=function(){reject(new Error('Erro ao ler arquivo'));};reader.readAsText(file);});}
 async function startChecker(){
 if(isRunning)return;
@@ -179,52 +179,3 @@ btn.disabled=false;
 btn.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Iniciar Inspeção';
 document.getElementById('statusText').textContent='Sistema pronto · aguardando arquivo';
 document.getElementById('progressBar').style.width='0%';
-document.getElementById('progressPct').textContent='0%';
-}
-async function worker(){
-while(currentIndex<accounts.length){
-var idx=currentIndex++;
-var ac=accounts[idx];
-await checkAccount(ac.email,ac.password);
-var checked=liveCount+dieCount;
-var pct=Math.round((checked/accounts.length)*100);
-document.getElementById('progressBar').style.width=pct+'%';
-document.getElementById('progressPct').textContent=pct+'%';
-document.getElementById('statusText').textContent='Inspecionando '+checked+' / '+accounts.length+'...';
-}
-}
-async function checkAccount(email,password){
-var fd=new FormData();
-fd.append('email',email);
-fd.append('password',password);
-try{
-var res=await fetch('api.php?action=check',{method:'POST',body:fd});
-var r=await res.json();
-allResults.push({email:email,password:password,status:r.status});
-if(r.status==='live'){liveCount++;addToList('liveList',email+':'+password,'live-text');}
-else{dieCount++;addToList('dieList',email+':'+password+' \u00b7 '+(r.reason||'die'),'die-text');}
-updateCounts();
-}catch(e){
-allResults.push({email:email,password:password,status:'die'});
-dieCount++;
-addToList('dieList',email+':'+password+' \u00b7 ERROR','die-text');
-updateCounts();
-}
-}
-function addToList(id,text,cls){var el=document.getElementById(id);var div=document.createElement('div');div.className=cls;div.textContent=text;el.appendChild(div);el.scrollTop=el.scrollHeight;}
-function updateCounts(){document.getElementById('liveCount').textContent=liveCount;document.getElementById('dieCount').textContent=dieCount;document.getElementById('statLive').textContent=liveCount;document.getElementById('statDie').textContent=dieCount;}
-function downloadResults(type){
-var filtered=type==='lives'?allResults.filter(function(r){return r.status==='live';}):allResults.filter(function(r){return r.status!=='live';});
-if(filtered.length===0){alert('Nenhum resultado para exportar');return;}
-var text=filtered.map(function(r){return r.email+':'+r.password;}).join('\n');
-var blob=new Blob([text],{type:'text/plain'});
-var a=document.createElement('a');
-a.href=URL.createObjectURL(blob);
-a.download=type+'.txt';
-document.body.appendChild(a);
-a.click();
-document.body.removeChild(a);
-}
-</script>
-</body>
-</html>
