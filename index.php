@@ -7,7 +7,6 @@ $expiration = $_SESSION['expiration'] ?? 0;
 if ($role !== 'admin' && $expiration !== -1 && time() > $expiration) { session_destroy(); header("Location: login.html?msg=expired"); exit; }
 $is_admin = ($role === 'admin');
 $expiration_date = ($is_admin || $expiration === -1) ? "∞ Sem expiração" : date('d/m/Y H:i', $expiration);
-// FECHAR SESSÃO IMEDIATAMENTE — libera o bloqueio para as requisições fetch
 session_write_close();
 ?>
 <!DOCTYPE html>
@@ -150,9 +149,7 @@ session_write_close();
         .dot { width:8px;height:8px;border-radius:50%;flex-shrink:0; }
         .dot-live { background:var(--success);box-shadow:0 0 8px var(--success); }
         .dot-die  { background:var(--danger);box-shadow:0 0 8px var(--danger); }
-        .rp-badge {
-            padding:.15rem .55rem;border-radius:9999px;font-size:.72rem;font-weight:700;
-        }
+        .rp-badge { padding:.15rem .55rem;border-radius:9999px;font-size:.72rem;font-weight:700; }
         .badge-live { background:var(--success-bg);color:var(--success); }
         .badge-die  { background:var(--danger-bg);color:var(--danger); }
         .log-box {
@@ -305,14 +302,13 @@ session_write_close();
 
     let accounts=[],proxies=[],currentIndex=0,liveCount=0,dieCount=0,isRunning=false;
     let allResults=[];
-    const THREADS=8;
+    const THREADS=6;
 
-    // CORREÇÃO: FileReader em vez de File.text()
     function readFile(file) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = function(e) { resolve(e.target.result); };
-            reader.onerror = function(e) { reject(new Error('Erro ao ler arquivo')); };
+            reader.onerror = function() { reject(new Error('Erro ao ler arquivo')); };
             reader.readAsText(file);
         });
     }
@@ -326,17 +322,15 @@ session_write_close();
         btn.innerHTML='<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Carregando...';
 
         try {
-            // CORREÇÃO: init não bloqueia — continua mesmo se falhar
             try {
                 const res = await fetch('api.php?action=init');
                 const d = await res.json();
                 proxies = d.proxies || [];
             } catch(e) {
-                console.warn('Init falhou, continuando sem proxies:', e);
+                console.warn('Init falhou, continuando:', e);
                 proxies = [];
             }
 
-            // CORREÇÃO: FileReader em vez de fileInput.files[0].text()
             const text = await readFile(fileInput.files[0]);
 
             accounts = [];
@@ -375,7 +369,6 @@ session_write_close();
             btn.innerHTML = '✔ Processo Finalizado';
         } catch(err) {
             console.error('startChecker error:', err);
-            alert('Erro: ' + err.message);
             resetUI();
         }
     }
@@ -394,9 +387,7 @@ session_write_close();
         while(currentIndex < accounts.length){
             const idx = currentIndex++;
             const ac = accounts[idx];
-            let proxy = '';
-            if(proxies.length > 0) proxy = proxies[Math.floor(Math.random()*proxies.length)];
-            await checkAccount(ac.email, ac.password, proxy);
+            await checkAccount(ac.email, ac.password);
             const checked = liveCount + dieCount;
             const pct = Math.round((checked / accounts.length) * 100);
             document.getElementById('progressBar').style.width = pct + '%';
@@ -405,17 +396,16 @@ session_write_close();
         }
     }
 
-    async function checkAccount(email, password, proxy){
+    async function checkAccount(email, password){
         const fd = new FormData();
         fd.append('email', email);
         fd.append('password', password);
-        if(proxy) fd.append('proxy', proxy);
 
         try {
             const res = await fetch('api.php?action=check', {method: 'POST', body: fd});
             const r = await res.json();
 
-            allResults.push({email, password, status: r.status, reason: r.reason});
+            allResults.push({email, password, status: r.status});
 
             if(r.status === 'live') {
                 liveCount++;
@@ -426,8 +416,7 @@ session_write_close();
             }
             updateCounts();
         } catch(e) {
-            console.error('checkAccount error:', email, e);
-            allResults.push({email, password, status: 'die', reason: 'ERROR'});
+            allResults.push({email, password, status: 'die'});
             dieCount++;
             addToList('dieList', email + ':' + password + ' · ERROR', 'die-text');
             updateCounts();
@@ -450,7 +439,6 @@ session_write_close();
         document.getElementById('statDie').textContent = dieCount;
     }
 
-    // CORREÇÃO: download client-side — não precisa de api.php?action=download
     function downloadResults(type){
         const filtered = type === 'lives'
             ? allResults.filter(r => r.status === 'live')
