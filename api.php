@@ -91,24 +91,61 @@ function testProxyConnection(string $proxy): bool {
     return ($result !== false && strlen(trim($result)) > 0);
 }
 
+// ═══════════════════════════════════════
+//  CORREÇÃO PRINCIPAL: applyProxyOpts
+//  CURLOPT_PROXY deve ser host:port SEM scheme
+//  Usar CURLPROXY_SOCKS5_HOSTNAME para DNS remoto
+// ═══════════════════════════════════════
+
 function applyProxyOpts(string $proxy, array &$opts): void {
     if (empty($proxy)) return;
+
     $proxyLower = strtolower($proxy);
-    if (strpos($proxyLower, 'socks5') === 0) { $opts[CURLOPT_PROXYTYPE] = CURLPROXY_SOCKS5; }
-    elseif (strpos($proxyLower, 'socks4') === 0) { $opts[CURLOPT_PROXYTYPE] = CURLPROXY_SOCKS4; }
-    else { $opts[CURLOPT_PROXYTYPE] = CURLPROXY_HTTP; }
-    $proxyUrl = $proxy;
+
+    // Determinar tipo
+    if (strpos($proxyLower, 'socks5') === 0) {
+        // CURLPROXY_SOCKS5_HOSTNAME = 7 (resolve DNS através do proxy)
+        $opts[CURLOPT_PROXYTYPE] = defined('CURLPROXY_SOCKS5_HOSTNAME') ? CURLPROXY_SOCKS5_HOSTNAME : 7;
+    } elseif (strpos($proxyLower, 'socks4') === 0) {
+        $opts[CURLOPT_PROXYTYPE] = CURLPROXY_SOCKS4;
+    } else {
+        $opts[CURLOPT_PROXYTYPE] = CURLPROXY_HTTP;
+    }
+
+    // Extrair user:pass e host:port
+    $proxyHost = '';
     $proxyAuth = '';
-    if (preg_match('/^(https?:\/\/)([^:@]+:[^@]+)@(.+)$/i', $proxy, $m)) { $proxyAuth = $m[2]; $proxyUrl = $m[1] . $m[3]; }
-    elseif (preg_match('/^(socks[45]h?:\/\/)([^:@]+:[^@]+)@(.+)$/i', $proxy, $m)) { $proxyAuth = $m[2]; $proxyUrl = $m[1] . $m[3]; }
-    elseif (preg_match('/^([^:@]+:[^@]+)@(.+)$/', $proxy, $m)) { $proxyAuth = $m[1]; $proxyUrl = $m[2]; }
-    if (!preg_match('/^(http|https|socks)/i', $proxyUrl)) { $proxyUrl = 'http://' . $proxyUrl; }
-    $opts[CURLOPT_PROXY] = $proxyUrl;
-    if (!empty($proxyAuth)) { $opts[CURLOPT_PROXYUSERPWD] = $proxyAuth; }
+
+    // socks5://user:pass@host:port
+    if (preg_match('/^socks[45]h?:\/\/([^:@]+):([^@]+)@(.+)$/i', $proxy, $m)) {
+        $proxyAuth = $m[1] . ':' . $m[2];
+        $proxyHost = $m[3];
+    }
+    // http://user:pass@host:port
+    elseif (preg_match('/^https?:\/\/([^:@]+):([^@]+)@(.+)$/i', $proxy, $m)) {
+        $proxyAuth = $m[1] . ':' . $m[2];
+        $proxyHost = $m[3];
+    }
+    // user:pass@host:port (sem scheme)
+    elseif (preg_match('/^([^:@]+):([^@]+)@(.+)$/', $proxy, $m)) {
+        $proxyAuth = $m[1] . ':' . $m[2];
+        $proxyHost = $m[3];
+    }
+    // host:port (sem auth, sem scheme)
+    else {
+        $proxyHost = preg_replace('/^(socks[45]h?|https?):\/\//i', '', $proxy);
+    }
+
+    // CORREÇÃO: CURLOPT_PROXY recebe apenas host:port (SEM scheme)
+    $opts[CURLOPT_PROXY] = $proxyHost;
+
+    if (!empty($proxyAuth)) {
+        $opts[CURLOPT_PROXYUSERPWD] = $proxyAuth;
+    }
 }
 
 // ═══════════════════════════════════════
-//  VALIDAÇÃO — TENTA COM PROXY, DEPOIS SEM PROXY
+//  VALIDAÇÃO — SEMPRE COM PROXY
 // ═══════════════════════════════════════
 
 function doValidate(string $email, string $password, string $proxy = ''): array {
@@ -118,21 +155,17 @@ function doValidate(string $email, string $password, string $proxy = ''): array 
     for ($attempt = 0; $attempt < 5; $attempt++) {
         if ($delays[$attempt] > 0) usleep($delays[$attempt]);
 
-        // COM proxy (se tiver)
-        if (!empty($proxy) && extension_loaded('curl')) {
+        // cURL com proxy (sempre)
+        if (extension_loaded('curl')) {
             $r = tryCurl($email, $password, $timeout, $proxy);
             if ($r !== null) return $r;
         }
 
-        // SEM proxy (sempre tenta direto)
-        if (extension_loaded('curl')) {
-            $r = tryCurl($email, $password, $timeout, '');
+        // Socket direto apenas se não tiver proxy
+        if (empty($proxy)) {
+            $r = trySocket($email, $password, $timeout);
             if ($r !== null) return $r;
         }
-
-        // Socket direto (sem proxy)
-        $r = trySocket($email, $password, $timeout);
-        if ($r !== null) return $r;
     }
 
     return ['status' => 'die', 'email' => $email, 'reason' => 'Connection failed', 'retry_exhausted' => true];
