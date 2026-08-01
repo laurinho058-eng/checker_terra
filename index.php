@@ -160,11 +160,9 @@ async function startChecker(){
     btn.disabled=true;
     btn.innerHTML='Carregando...';
     try{
-        // Carrega proxies do proxies.txt
         proxies=[];activeProxy='';
         try{var res=await fetch('api.php?action=init');var d=await res.json();proxies=d.proxies||[];}catch(e){proxies=[];}
 
-        // Se há proxies, testa — mas NÃO BLOQUEIA se falhar
         if(proxies.length>0){
             btn.innerHTML='Testando '+proxies.length+' proxies...';
             document.getElementById('statusText').textContent='Testando proxies...';
@@ -177,15 +175,16 @@ async function startChecker(){
                     var pdata=await pres.json();
                     if(pdata.status==='ok'){
                         activeProxy=proxies[p];
-                        document.getElementById('statusText').textContent='Proxy conectado! Iniciando...';
+                        document.getElementById('statusText').textContent='Proxy SOCKS5 conectado! Iniciando...';
                         break;
                     }
                 }catch(e){}
                 await sleep(300);
             }
-            // Se nenhum proxy funcionou, NÃO bloqueia — continua sem proxy
             if(activeProxy===''){
-                document.getElementById('statusText').textContent='Proxy falhou · usando conexão direta...';
+                alert('Proxy nao respondeu ao teste HTTPS. Continuando com proxy mesmo assim...');
+                activeProxy=proxies[0];
+                document.getElementById('statusText').textContent='Usando proxy (sem confirmacao HTTPS)...';
             }
         }
 
