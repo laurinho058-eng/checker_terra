@@ -95,9 +95,8 @@ function trySocket(string $email, string $password, int $timeout): ?array {
     stream_set_timeout($socket, $timeout);
     $greeting = @fgets($socket, 8192);
     if (!$greeting || stripos($greeting, 'OK') === false) { fclose($socket); return null; }
-    // CORRIGIDO: escaping correto de backslash e aspas duplas
-    $safe_email = str_replace(array(chr(92), '"'), array(chr(92) . chr(92), chr(92) . '"'), $email);
-    $safe_pass = str_replace(array(chr(92), '"'), array(chr(92) . chr(92), chr(92) . '"'), $password);
+    $safe_email = addslashes($email);
+    $safe_pass = addslashes($password);
     fwrite($socket, "A1 LOGIN \"{$safe_email}\" \"{$safe_pass}\"\r\n");
     $response = '';
     $deadline = microtime(true) + $timeout;
