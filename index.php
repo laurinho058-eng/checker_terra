@@ -111,7 +111,7 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 </div>
 </nav>
 <main>
-<div class="hero"><h1>Checker <span>TERRA</span></h1><p>Kroenen Automation Engine · OAuth2 TERRA Validator</p></div>
+<div class="hero"><h1>Checker <span>TerraMail</span></h1><p>Kroenen Automation Engine · OAuth2 TerraMail Validator</p></div>
 <div class="stats">
 <div class="stat-card"><div class="stat-icon" style="background:rgba(124,58,237,.12)"><svg style="stroke:var(--accent-hi)" viewBox="0 0 24 24"><path d="M4 4h16v3H4zM4 11h16v2H4zM4 17h10v2H4z"/></svg></div><div><div class="stat-label">Total</div><div class="stat-val" id="statTotal">0</div></div></div>
 <div class="stat-card"><div class="stat-icon" style="background:var(--success-bg)"><svg style="stroke:var(--success)" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div><div><div class="stat-label">Live</div><div class="stat-val" id="statLive" style="color:var(--success)">0</div></div></div>
