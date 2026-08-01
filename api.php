@@ -1,7 +1,7 @@
 <?php
 error_reporting(0);
 ini_set('display_errors', '0');
-ini_set('max_execution_time', '20');
+ini_set('max_execution_time', '30');
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
 
@@ -56,15 +56,35 @@ if ($action === 'check') {
 echo json_encode(['status' => 'ok']);
 exit;
 
+// ═══════════════════════════════════════
+//  VALIDAÇÃO — 2 métodos + 1 retry
+// ═══════════════════════════════════════
+
 function doValidate(string $email, string $password): array {
-    $timeout = 8;
+    $timeout = 12;
+
+    // Tentativa 1
+    $r = tryBothMethods($email, $password, $timeout);
+    if ($r !== null) return $r;
+
+    // Espera 1s e tenta novamente (servidor pode ter rate-limited)
+    usleep(1000000);
+
+    // Tentativa 2
+    $r = tryBothMethods($email, $password, $timeout);
+    if ($r !== null) return $r;
+
+    return ['status' => 'die', 'email' => $email, 'reason' => 'Connection failed'];
+}
+
+function tryBothMethods(string $email, string $password, int $timeout): ?array {
     if (extension_loaded('curl')) {
         $r = tryCurl($email, $password, $timeout);
         if ($r !== null) return $r;
     }
     $r = trySocket($email, $password, $timeout);
     if ($r !== null) return $r;
-    return ['status' => 'die', 'email' => $email, 'reason' => 'Connection failed'];
+    return null;
 }
 
 function tryCurl(string $email, string $password, int $timeout): ?array {
