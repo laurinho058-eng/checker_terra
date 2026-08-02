@@ -379,48 +379,74 @@ function trySocks5Soap($email, $password, $timeout, $proxy) {
     return parseZimbraResult($resp['body'], $resp['code'], $email);
 }
 
-function tryCurlSoap($email, $password, $timeout, $proxy) {
+function tryCurlSoap($email, $password, $timeout, $proxy, $forceHttpProxy = false) {
     if (!extension_loaded('curl')) return null;
     $soapXml = buildSoapRequest($email, $password);
 
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, 'https://mail.terra.com.br/service/soap/');
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $soapXml);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
-    curl_setopt($ch, CURLOPT_HEADER, false);
-    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
-    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    curl_setopt($ch, CURLOPT_HTTPHEADER, array(
-        'Content-Type: application/soap+xml; charset=utf-8',
-        'Accept: application/soap+xml, text/xml, */*',
-    ));
+    $proxySetup = function($ch, $p, $useHttp) {
+        curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
+        if (!empty($p['user'])) {
+            curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
+        }
+        if ($useHttp) {
+            // HTTP CONNECT tunnel
+            curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+            curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
+        } elseif ($p['type'] === 'socks4') {
+            curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS4);
+        } else {
+            // SOCKS5 com DNS remoto
+            curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTN);
+        }
+    };
+
+    $commonOpts = function($ch) use ($soapXml, $timeout) {
+        curl_setopt($ch, CURLOPT_URL, 'https://mail.terra.com.br/service/soap/');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $soapXml);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        curl_setopt($ch, CURLOPT_HEADER, false);
+        curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+        curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+        curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+            'Content-Type: application/soap+xml; charset=utf-8',
+            'Accept: application/soap+xml, text/xml, */*',
+        ));
+    };
 
     if (!empty($proxy)) {
         $p = parseProxy($proxy);
         if (!empty($p['host'])) {
-            curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
-            if ($p['type'] === 'socks5') {
-                curl_setopt($ch, CURLOPT_PROXYTYPE, 7);
-            } elseif ($p['type'] === 'socks4') {
-                curl_setopt($ch, CURLOPT_PROXYTYPE, 4);
-            } else {
-                curl_setopt($ch, CURLOPT_PROXYTYPE, 0);
-                curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
-            }
-            if (!empty($p['user'])) {
-                curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
-            }
+            // Tentativa 1: tipo conforme configurado (ou forcado)
+            $ch = curl_init();
+            $commonOpts($ch);
+            $proxySetup($ch, $p, $forceHttpProxy);
+            $result = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            $r = parseZimbraResult($result, $code, $email);
+            if ($r !== null) return $r;
+
+            // Tentativa 2: inverter tipo (SOCKS5 -> HTTP ou HTTP -> SOCKS5)
+            $ch = curl_init();
+            $commonOpts($ch);
+            $proxySetup($ch, $p, !$forceHttpProxy && $p['type'] !== 'http');
+            $result = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            return parseZimbraResult($result, $code, $email);
         }
     }
 
+    // Sem proxy - direto
+    $ch = curl_init();
+    $commonOpts($ch);
     $result = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-
     return parseZimbraResult($result, $code, $email);
 }
 
