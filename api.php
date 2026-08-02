@@ -83,19 +83,30 @@ echo json_encode(array('status' => 'ok'));
 exit;
 
 function parseProxy($proxy) {
-    $host = ''; $port = 0; $user = ''; $pass = ''; $type = 'http';
+    $host = ''; $port = 0; $user = ''; $pass = ''; $type = 'socks5'; // Default to SOCKS5
     $lower = strtolower($proxy);
-    if (strpos($lower, 'socks5') === 0) $type = 'socks5';
-    elseif (strpos($lower, 'socks4') === 0) $type = 'socks4';
-    if (preg_match('#^(socks[45]h?|https?)://([^:@]+):([^@]+)@([^:]+):(\d+)$#i', $proxy, $m)) {
-        $user = $m[2]; $pass = $m[3]; $host = $m[4]; $port = (int)$m[5];
-    } elseif (preg_match('#^([^:@]+):([^@]+)@([^:]+):(\d+)$#', $proxy, $m)) {
+    
+    // Explicit scheme
+    if (preg_match('#^(socks[45]h?|https?)://(.*)$#i', $proxy, $m)) {
+        $scheme = strtolower($m[1]);
+        if (strpos($scheme, 'socks') === 0) {
+            $type = 'socks5';
+            if ($scheme === 'socks4') $type = 'socks4';
+        } else {
+            $type = 'http';
+        }
+        $proxy = $m[2]; // Remove scheme for further parsing
+    }
+    
+    // Parse the rest
+    if (preg_match('#^([^:@]+):([^@]+)@([^:]+):(\d+)$#', $proxy, $m)) {
         $user = $m[1]; $pass = $m[2]; $host = $m[3]; $port = (int)$m[4];
-    } elseif (preg_match('#^(socks[45]h?|https?)://([^:]+):(\d+)$#i', $proxy, $m)) {
-        $host = $m[2]; $port = (int)$m[3];
+    } elseif (preg_match('#^([^:]+):(\d+):([^:]+):([^:]+)$#', $proxy, $m)) {
+        $host = $m[1]; $port = (int)$m[2]; $user = $m[3]; $pass = $m[4];
     } elseif (preg_match('#^([^:]+):(\d+)$#', $proxy, $m)) {
         $host = $m[1]; $port = (int)$m[2];
     }
+    
     return array('host' => $host, 'port' => $port, 'user' => $user, 'pass' => $pass, 'type' => $type);
 }
 
@@ -197,26 +208,34 @@ function socks5Tunnel($p, $targetHost, $targetPort, $timeout) {
     $connectReq = chr(5) . chr(1) . chr(0) . chr(3) . chr(strlen($targetHost)) . $targetHost . pack('n', $targetPort);
     fwrite($socket, $connectReq);
 
-    // 5. Ler resposta (minimo 10 bytes)
-    $resp = '';
-    $deadline = microtime(true) + $timeout;
-    while (strlen($resp) < 10 && !feof($socket) && microtime(true) < $deadline) {
-        $chunk = @fread($socket, 10 - strlen($resp));
-        if ($chunk === false || $chunk === '') { usleep(100000); continue; }
-        $resp .= $chunk;
-    }
+    // 5. Ler resposta (dinamicamente baseado no ATYP para não engolir bytes do TLS)
+    $resp = @fread($socket, 4);
+    if (strlen($resp) < 4 || ord($resp[1]) !== 0) { fclose($socket); return false; }
 
-    // Verificar se o tunnel foi estabelecido (REP = 0x00 = success)
-    if (strlen($resp) < 10 || ord($resp[1]) !== 0) { fclose($socket); return false; }
+    $atyp = ord($resp[3]);
+    if ($atyp === 1) {
+        @fread($socket, 6); // 4 bytes IP + 2 bytes port
+    } elseif ($atyp === 3) {
+        $len = ord(@fread($socket, 1));
+        @fread($socket, $len + 2); // len bytes domain + 2 bytes port
+    } elseif ($atyp === 4) {
+        @fread($socket, 18); // 16 bytes IPv6 + 2 bytes port
+    } else {
+        fclose($socket); return false;
+    }
 
     return $socket;
 }
 
 function enableTLS($socket, $timeout) {
+    stream_set_blocking($socket, false);
     $deadline = microtime(true) + $timeout;
     while (microtime(true) < $deadline) {
         $r = @stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
-        if ($r === true) return true;
+        if ($r === true) {
+            stream_set_blocking($socket, true);
+            return true;
+        }
         if ($r === false) return false;
         usleep(100000);
     }
@@ -224,6 +243,8 @@ function enableTLS($socket, $timeout) {
 }
 
 function readHttpResponse($socket, $timeout) {
+    stream_set_blocking($socket, true);
+    stream_set_timeout($socket, $timeout);
     $raw = '';
     $deadline = microtime(true) + $timeout;
     $headersDone = false;
@@ -326,7 +347,7 @@ function trySocks5Soap($email, $password, $timeout, $proxy) {
     return parseZimbraResult($resp['body'], $resp['code'], $email);
 }
 
-function tryCurlSoapDirect($email, $password, $timeout) {
+function tryCurlSoap($email, $password, $timeout, $proxy) {
     if (!extension_loaded('curl')) return null;
     $soapXml = buildSoapRequest($email, $password);
 
@@ -345,6 +366,24 @@ function tryCurlSoapDirect($email, $password, $timeout) {
         'Content-Type: application/soap+xml; charset=utf-8',
         'Accept: application/soap+xml, text/xml, */*',
     ));
+
+    if (!empty($proxy)) {
+        $p = parseProxy($proxy);
+        if (!empty($p['host'])) {
+            curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
+            if ($p['type'] === 'socks5') {
+                curl_setopt($ch, CURLOPT_PROXYTYPE, 7);
+            } elseif ($p['type'] === 'socks4') {
+                curl_setopt($ch, CURLOPT_PROXYTYPE, 4);
+            } else {
+                curl_setopt($ch, CURLOPT_PROXYTYPE, 0);
+                curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
+            }
+            if (!empty($p['user'])) {
+                curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
+            }
+        }
+    }
 
     $result = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -366,9 +405,9 @@ function doValidate($email, $password, $proxy) {
             if ($r !== null) return $r;
         }
 
-        // Metodo 2: cURL SOAP direto (sem proxy)
+        // Metodo 2: cURL SOAP com proxy
         if (extension_loaded('curl')) {
-            $r = tryCurlSoapDirect($email, $password, $timeout);
+            $r = tryCurlSoap($email, $password, $timeout, $proxy);
             if ($r !== null) return $r;
         }
     }
