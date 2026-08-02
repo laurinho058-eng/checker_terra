@@ -182,9 +182,9 @@ async function startChecker(){
                 await sleep(300);
             }
             if(activeProxy===''){
-                alert('Proxy nao respondeu ao teste HTTPS. Continuando com proxy mesmo assim...');
+                console.warn('Proxy nao respondeu ao teste TCP/HTTPS. Continuando com proxy mesmo assim...');
                 activeProxy=proxies[0];
-                document.getElementById('statusText').textContent='Usando proxy (sem confirmacao HTTPS)...';
+                document.getElementById('statusText').textContent='Usando proxy (modo direto)...';
             }
         }
 
