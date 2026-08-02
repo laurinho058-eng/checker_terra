@@ -111,25 +111,46 @@ function parseProxy($proxy) {
 }
 
 function testProxy($proxy) {
-    if (!extension_loaded('curl')) return false;
     $p = parseProxy($proxy);
-    if (empty($p['host'])) return false;
+    if (empty($p['host']) || empty($p['port'])) return false;
+
+    // Estrategia 1: TCP puro - verifica se o host do proxy e alcancavel (rapido e confiavel)
+    $sock = @fsockopen($p['host'], $p['port'], $errno, $errstr, 8);
+    if ($sock !== false) {
+        fclose($sock);
+        return true;
+    }
+
+    if (!extension_loaded('curl')) return false;
+
+    $proxyType = ($p['type'] === 'socks5') ? 7 : (($p['type'] === 'socks4') ? 4 : 0);
+    $proxyAddr = $p['host'] . ':' . $p['port'];
+    $proxyAuth = (!empty($p['user'])) ? ($p['user'] . ':' . $p['pass']) : '';
+
+    // Estrategia 2: HTTP simples via cURL (sem SSL - evita problemas de certificado no servidor)
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'http://api.ipify.org/');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 12);
+    curl_setopt($ch, CURLOPT_PROXY, $proxyAddr);
+    curl_setopt($ch, CURLOPT_PROXYTYPE, $proxyType);
+    if ($proxyType === 0) curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
+    if (!empty($proxyAuth)) curl_setopt($ch, CURLOPT_PROXYUSERPWD, $proxyAuth);
+    $result = curl_exec($ch);
+    curl_close($ch);
+    if ($result !== false && strlen(trim($result)) > 0) return true;
+
+    // Estrategia 3: HTTPS com SSL desabilitado como ultimo fallback
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, 'https://api.ipify.org/');
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 12);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
-    curl_setopt($ch, CURLOPT_PROXY, $p['host'] . ':' . $p['port']);
-    if ($p['type'] === 'socks5') {
-        curl_setopt($ch, CURLOPT_PROXYTYPE, 7);
-    } else {
-        curl_setopt($ch, CURLOPT_PROXYTYPE, 0);
-        curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
-    }
-    if (!empty($p['user'])) {
-        curl_setopt($ch, CURLOPT_PROXYUSERPWD, $p['user'] . ':' . $p['pass']);
-    }
+    curl_setopt($ch, CURLOPT_PROXY, $proxyAddr);
+    curl_setopt($ch, CURLOPT_PROXYTYPE, $proxyType);
+    if ($proxyType === 0) curl_setopt($ch, CURLOPT_HTTPPROXYTUNNEL, true);
+    if (!empty($proxyAuth)) curl_setopt($ch, CURLOPT_PROXYUSERPWD, $proxyAuth);
     $result = curl_exec($ch);
     curl_close($ch);
     return ($result !== false && strlen(trim($result)) > 0);
@@ -179,6 +200,17 @@ function parseZimbraResult($body, $code, $email) {
 //  HTTP/1.1 em vez de HTTP/2 (cURL usa HTTP/2)
 // =========================================
 
+function readExact($socket, $len, $timeout) {
+    $data = '';
+    $deadline = microtime(true) + $timeout;
+    while (strlen($data) < $len && !feof($socket) && microtime(true) < $deadline) {
+        $chunk = @fread($socket, $len - strlen($data));
+        if ($chunk === false || $chunk === '') { usleep(50000); continue; }
+        $data .= $chunk;
+    }
+    return $data;
+}
+
 function socks5Tunnel($p, $targetHost, $targetPort, $timeout) {
     // 1. TCP ao proxy SOCKS5
     $socket = @fsockopen($p['host'], $p['port'], $errno, $errstr, $timeout);
@@ -188,7 +220,7 @@ function socks5Tunnel($p, $targetHost, $targetPort, $timeout) {
 
     // 2. SOCKS5 greeting - oferecer no-auth (0x00) e user/pass (0x02)
     fwrite($socket, chr(5) . chr(2) . chr(0) . chr(2));
-    $greeting = @fread($socket, 2);
+    $greeting = readExact($socket, 2, $timeout);
     if (strlen($greeting) < 2) { fclose($socket); return false; }
     $method = ord($greeting[1]);
 
@@ -198,7 +230,7 @@ function socks5Tunnel($p, $targetHost, $targetPort, $timeout) {
         $pass = $p['pass'];
         $auth = chr(1) . chr(strlen($user)) . $user . chr(strlen($pass)) . $pass;
         fwrite($socket, $auth);
-        $authResp = @fread($socket, 2);
+        $authResp = readExact($socket, 2, $timeout);
         if (strlen($authResp) < 2 || ord($authResp[1]) !== 0) { fclose($socket); return false; }
     } elseif ($method !== 0) {
         fclose($socket); return false;
@@ -209,17 +241,17 @@ function socks5Tunnel($p, $targetHost, $targetPort, $timeout) {
     fwrite($socket, $connectReq);
 
     // 5. Ler resposta (dinamicamente baseado no ATYP para não engolir bytes do TLS)
-    $resp = @fread($socket, 4);
+    $resp = readExact($socket, 4, $timeout);
     if (strlen($resp) < 4 || ord($resp[1]) !== 0) { fclose($socket); return false; }
 
     $atyp = ord($resp[3]);
     if ($atyp === 1) {
-        @fread($socket, 6); // 4 bytes IP + 2 bytes port
+        readExact($socket, 6, $timeout); // 4 bytes IP + 2 bytes port
     } elseif ($atyp === 3) {
-        $len = ord(@fread($socket, 1));
-        @fread($socket, $len + 2); // len bytes domain + 2 bytes port
+        $len = ord(readExact($socket, 1, $timeout));
+        readExact($socket, $len + 2, $timeout); // len bytes domain + 2 bytes port
     } elseif ($atyp === 4) {
-        @fread($socket, 18); // 16 bytes IPv6 + 2 bytes port
+        readExact($socket, 18, $timeout); // 16 bytes IPv6 + 2 bytes port
     } else {
         fclose($socket); return false;
     }
@@ -393,10 +425,10 @@ function tryCurlSoap($email, $password, $timeout, $proxy) {
 }
 
 function doValidate($email, $password, $proxy) {
-    $timeout = 25;
-    $delays = array(0, 2000000, 4000000, 7000000, 10000000);
+    $timeout = 10;
+    $delays = array(0, 1000000, 2000000);
 
-    for ($attempt = 0; $attempt < 5; $attempt++) {
+    for ($attempt = 0; $attempt < 3; $attempt++) {
         if ($delays[$attempt] > 0) usleep($delays[$attempt]);
 
         // Metodo 1: SOCKS5 binario -> TLS PHP -> SOAP HTTP/1.1
